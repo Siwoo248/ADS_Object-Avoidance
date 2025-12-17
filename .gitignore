@@ -1,0 +1,5 @@
+model/
+test1/
+*/__pycache__
+*.pyc
+dataset/
