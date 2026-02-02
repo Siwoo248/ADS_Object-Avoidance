@@ -1,0 +1,9 @@
+Step1: Detect Object as car or pedestrian
+Step2: If car or pedestrian detected Goto Step3
+Step3: Is current distance < previous distance Goto Step4 Else Goto Step5
+Step4: Is current distance < distance minimum Goto Step6 Else Goto Step5
+Step5: Continue with Throttle = 0.5
+Step6: Throttle = Throttle - 0.2
+Step7: Is current distance != previous distance Goto Step4 Else Goto Step8
+Step8: Set Throttle = 0
+Step9: END

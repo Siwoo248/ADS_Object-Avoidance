@@ -1,0 +1,13 @@
+# pyrealsense2==2.56.5.9235
+opencv-python==4.8.1.78
+numpy==1.24.3  #2.2.6
+ultralytics==8.4.2
+jetracer @ git+https://github.com/waveshare/Jetracer.git@master#egg=jetracer
+traitlets>=5.0.0
+adafruit-blinka>=8.0.0
+adafruit-circuitpython-servokit>=1.3.0
+Jetson.GPIO>=2.0.0
+# torch>=2.0.0
+# torchvision>=0.15.0
+# Torch has been using from external source due to compatibility issues with JetPack CUDA 
+
