@@ -1,7 +1,6 @@
 """
-Real-time YOLO object detection with RealSense depth measurement.
-Detects objects using YOLO and measures their distance using RealSense depth camera.
-Visualizes detections with distance annotations in real-time.
+Real-time YOLO object detection with RealSense depth and Obstacle Avoidance.
+Integrates the obstacle avoidance system with YOLO detection.
 """
 
 import sys
@@ -14,8 +13,15 @@ import torch
 import importlib.util
 from pathlib import Path
 
+# JetRacer motor control
+try:
+    from jetracer.nvidia_racecar import NvidiaRacecar
+    JETRACER_AVAILABLE = True
+except ImportError:
+    print("⚠️ JetRacer library not available - running in simulation mode")
+    JETRACER_AVAILABLE = False
+
 # Fix PyTorch 2.6+ weights loading issue before importing ultralytics
-# This allows loading of legacy model weights
 _orig_torch_load = torch.load
 
 def torch_load_with_legacy_support(*args, **kwargs):
@@ -32,8 +38,11 @@ sys.path.insert(0, str(parent_dir))
 
 from ultralytics import YOLO
 
+# Import the obstacle avoidance system
+from obstacle_avoidance import ObstacleAvoidanceSystem
+
 # Load configuration values directly from config file
-config_path = parent_dir / "config.py"
+config_path = parent_dir / "Yolo_object_detection" / "config.py"
 spec = importlib.util.spec_from_file_location("config", config_path)
 config_module = importlib.util.module_from_spec(spec)
 
@@ -53,22 +62,24 @@ LINE_THICKNESS = config_module.LINE_THICKNESS
 FONT_SCALE = config_module.FONT_SCALE
 
 
-class YOLODepthDetector:
+class YOLODepthDetectorWithAvoidance:
     """
-    Real-time YOLO detection with RealSense depth measurement.
-    Combines object detection with depth information.
+    Real-time YOLO detection with RealSense depth and obstacle avoidance.
+    Combines object detection, depth measurement, and avoidance decisions.
     """
     
     def __init__(self, model_path=MODEL_PATH, device=0, 
-                 conf_threshold=CONFIDENCE_THRESHOLD, iou_threshold=IOU_THRESHOLD):
+                 conf_threshold=CONFIDENCE_THRESHOLD, iou_threshold=IOU_THRESHOLD,
+                 enable_motor_control=False):
         """
-        Initialize the YOLO depth detector.
+        Initialize the YOLO depth detector with avoidance.
         
         Args:
             model_path (str): Path to the YOLO model
             device (int): GPU device index (will use CPU if no CUDA available)
             conf_threshold (float): Confidence threshold for detections
             iou_threshold (float): IOU threshold for NMS
+            enable_motor_control (bool): Enable actual motor control (default: False for safety)
         """
         # Load YOLO model with validation
         if not Path(model_path).exists():
@@ -118,6 +129,33 @@ class YOLODepthDetector:
         # Get camera intrinsics
         self.color_intr = self.profile.get_stream(rs.stream.color).as_video_stream_profile().get_intrinsics()
         
+        # Initialize Obstacle Avoidance System
+        print("\nInitializing Obstacle Avoidance System...")
+        self.avoidance = ObstacleAvoidanceSystem(frame_width=640, frame_height=480)
+        
+        # Initialize JetRacer motor control
+        self.enable_motor_control = enable_motor_control
+        self.car = None
+        
+        if JETRACER_AVAILABLE and self.enable_motor_control:
+            print("\n🚗 Initializing JetRacer motor control...")
+            try:
+                self.car = NvidiaRacecar()
+                self.car.throttle = 0.0
+                self.car.steering = 0.0
+                print("✅ JetRacer control ENABLED - Motors are ACTIVE!")
+                print("⚠️  WARNING: Vehicle WILL move! Press 'q' to stop immediately!")
+            except Exception as e:
+                print(f"❌ Failed to initialize JetRacer: {e}")
+                self.car = None
+                self.enable_motor_control = False
+        else:
+            if not JETRACER_AVAILABLE:
+                print("\n🔒 Motor control DISABLED - JetRacer library not available (simulation mode)")
+            else:
+                print("\n🔒 Motor control DISABLED - Set enable_motor_control=True to enable")
+                print("   (This is safer for testing!)")
+        
         # FPS tracking
         self.fps = 0
         self.frame_count = 0
@@ -132,6 +170,9 @@ class YOLODepthDetector:
         
         print("RealSense camera initialized successfully")
         print(f"Inference settings: conf={self.conf_threshold}, iou={self.iou_threshold}")
+        print("\n" + "=" * 60)
+        print("System ready! Press 'q' to exit, 'r' to reset avoidance")
+        print("=" * 60 + "\n")
     
     def get_detections(self, frame):
         """
@@ -374,9 +415,8 @@ class YOLODepthDetector:
         return frame
     
     def run(self):
-        """Run real-time detection and depth measurement."""
-        print("Starting real-time detection with depth measurement...")
-        print("Press 'q' to exit")
+        """Run real-time detection with depth measurement and obstacle avoidance."""
+        print("Starting real-time detection with obstacle avoidance...")
         print(f"Model classes: {', '.join(self.class_names)}")
         
         try:
@@ -399,8 +439,13 @@ class YOLODepthDetector:
                 color_image = np.asanyarray(color_frame.get_data())
                 depth_image = np.asanyarray(depth_frame.get_data())
                 
-                # Draw detections with distances
+                # Start with color image
                 annotated_frame = color_image.copy()
+                
+                # Lists to store detections for avoidance system
+                all_boxes = []
+                all_distances = []
+                all_detections = []
                 
                 # Only run inference on every Nth frame to reduce memory pressure
                 if frame_count % inference_skip == 0:
@@ -431,24 +476,19 @@ class YOLODepthDetector:
                         self.last_distances = []
                         
                         # Process each detection
-                        detection_info = []
                         for box, conf, class_id in zip(boxes, confidences, class_ids):
                             center_x, center_y, distance = self.get_box_center_distance(depth_frame, box)
                             self.last_distances.append(distance)
+                            
+                            # Store for avoidance system
+                            all_boxes.append(box)
+                            all_distances.append(distance)
+                            all_detections.append(1)
                             
                             # Draw detection with distance
                             annotated_frame = self.draw_detection_with_distance(
                                 annotated_frame, box, conf, class_id, distance
                             )
-                            
-                            # Store detection info for console output
-                            class_name = self.class_names[class_id] if class_id < len(self.class_names) else f"Class {class_id}"
-                            detection_info.append(f"{class_name}: {distance:.2f}m" if distance > 0 else f"{class_name}: N/A")
-                        
-                        # Print detections to console
-                        print(f"Frame {frame_count} - Detections: {', '.join(detection_info)}", end="\r")
-                    else:
-                        print(f"Frame {frame_count} - No detections", end="\r")
                 
                 elif hasattr(self, 'last_boxes') and self.last_boxes is not None:
                     # Reuse previous detection results for skipped frames
@@ -457,23 +497,52 @@ class YOLODepthDetector:
                         annotated_frame = self.draw_detection_with_distance(
                             annotated_frame, box, conf, class_id, distance
                         )
+                        
+                        # Store for avoidance system
+                        all_boxes.append(box)
+                        all_distances.append(distance)
+                        all_detections.append(1)
                 
-                frame_count += 1
+                # Process obstacles with avoidance system
+                action, steering, throttle = self.avoidance.process_obstacles(
+                    all_detections, all_distances, all_boxes
+                )
+                
+                # ✨ Apply steering and throttle to JetRacer motors
+                if self.enable_motor_control and self.car is not None:
+                    self.car.steering = steering
+                    self.car.throttle = -throttle  # Note: JetRacer uses negative for forward
+                    
+                    # Log motor commands (only when not zero)
+                    if abs(steering) > 0.01 or abs(throttle) > 0.01:
+                        print(f"🚗 Motors: steering={steering:+.2f}, throttle={-throttle:.2f}")
+                
+                # Draw lane overlay
+                annotated_frame = self.avoidance.draw_lane_overlay(annotated_frame)
                 
                 # Update and draw FPS
                 self.update_fps()
                 annotated_frame = self.draw_fps(annotated_frame)
                 
+                # Draw status panel
+                annotated_frame = self.avoidance.draw_status_panel(annotated_frame)
+                
+                frame_count += 1
+                
                 # Display frame
-                cv2.imshow("YOLO Detection with Depth Measurement", annotated_frame)
+                cv2.imshow("YOLO Detection with Obstacle Avoidance", annotated_frame)
                 
                 # Clear GPU cache every frame
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                 
-                # Handle exit key
-                if cv2.waitKey(1) & 0xFF == ord('q'):
+                # Handle key presses
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('q'):
                     break
+                elif key == ord('r'):
+                    print("\n[USER] Resetting avoidance system...")
+                    self.avoidance.reset()
         
         except KeyboardInterrupt:
             print("\nInterrupted by user")
@@ -484,6 +553,13 @@ class YOLODepthDetector:
     def cleanup(self):
         """Clean up resources."""
         print("Cleaning up...")
+        
+        # Emergency stop motors
+        if self.enable_motor_control and self.car is not None:
+            print("🛑 Stopping motors...")
+            self.car.throttle = 0.0
+            self.car.steering = 0.0
+        
         self.pipeline.stop()
         cv2.destroyAllWindows()
         print("Done!")
@@ -492,7 +568,9 @@ class YOLODepthDetector:
 def main():
     """Main entry point."""
     try:
-        detector = YOLODepthDetector()
+        enable_motors = False  # True / False
+        
+        detector = YOLODepthDetectorWithAvoidance(enable_motor_control=enable_motors)
         detector.run()
     except Exception as e:
         print(f"Error: {e}")
