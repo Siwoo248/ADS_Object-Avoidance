@@ -32,32 +32,41 @@ class ObstacleAvoidanceSystem:
         self.LEFT_LANE_X = 180      # Left lane boundary (pixels)
         self.RIGHT_LANE_X = 460     # Right lane boundary (pixels)
         self.LANE_WIDTH_PIXELS = self.RIGHT_LANE_X - self.LEFT_LANE_X
-        
+
         # Distance thresholds (meters)
         self.CRITICAL_DISTANCE = 0.5    # Make decision at this distance
-        
+
         # Hysteresis thresholds to prevent oscillation
         self.DECISION_ENTER = 0.5       # Trigger decision
         self.DECISION_EXIT = 0.6        # Clear decision (must be > DECISION_ENTER)
-        
+
         # Coverage thresholds (what fraction of lane the obstacle blocks)
         self.MICRO_ADJUST_THRESHOLD = 0.33   # < 33% of lane in A or C → micro adjust
-        # >= 33% OR in B zone → lane change
-        
+        # >= 33% OR in B zone → lane change or stop
+
         # Steering parameters
         self.MICRO_ADJUST_STEERING = 0.15    # Small steering bias (stay in lane)
         self.LANE_CHANGE_STEERING = 0.6      # Full lane change maneuver
-        
+
         # Throttle parameters - FIXED at 0.5
         self.THROTTLE = 0.5  # Fixed throttle for all situations
-        
+
         # Vehicle speed calibration (measured experimentally)
         self.VEHICLE_SPEED = 0.25  # m/s at throttle 0.5 (adjust after testing!)
         self.LATERAL_SPEED = 0.15  # m/s at steering 0.5
+
+        # Lane preference for two-lane road (vehicle normally on right)
+        self.PREFERRED_LANE = 'right'  # 'right' or 'left'
+        # When on right lane, left lane is typically empty
+        # So we prefer to change to left lane when avoiding obstacles
+
+        # Fixed distance to travel during lane change (since we can't detect when past obstacle)
+        self.LANE_CHANGE_PASS_DISTANCE = 0.5  # meters to travel forward while passing
+        self.LANE_CHANGE_MIN_CLEARANCE = 0.3   # minimum clearance from obstacle to attempt lane change
         
         # ========== STATE VARIABLES ==========
         self.decision_made = False
-        self.current_action = None
+        self.current_action = 'NORMAL'  # Start with NORMAL action instead of None
         self.current_steering = 0.0
         self.current_throttle = self.THROTTLE
         self.decision_timestamp = 0
@@ -69,6 +78,8 @@ class ObstacleAvoidanceSystem:
         self.overtaking_phase_start = 0
         self.overtaking_durations = None
         self.overtaking_initial_distance = 0
+        self.lane_change_direction = 0  # -1 = left, +1 = right, 0 = none
+        self.can_change_lane = True  # Whether lane change is possible
         
         # History for smoothing (simple moving average)
         self.distance_history = deque(maxlen=5)
@@ -79,9 +90,9 @@ class ObstacleAvoidanceSystem:
         print(f"Frame size: {frame_width}x{frame_height}")
         print(f"Lane boundaries: Left={self.LEFT_LANE_X}px, Right={self.RIGHT_LANE_X}px")
         print(f"Lane width: {self.LANE_WIDTH_PIXELS}px")
-        print(f"Distance zones: Critical<{self.CRITICAL_DISTANCE}m, "
-              f"Warning<{self.WARNING_DISTANCE}m, Safe<{self.SAFE_DISTANCE}m")
+        print(f"Decision threshold: {self.CRITICAL_DISTANCE}m")
         print(f"Hysteresis: Enter={self.DECISION_ENTER}m, Exit={self.DECISION_EXIT}m")
+        print(f"Preferred lane: {self.PREFERRED_LANE.upper()}")
         print("=" * 60)
     
     def smooth_distance(self, distance):
@@ -156,10 +167,10 @@ class ObstacleAvoidanceSystem:
         """
         Calculate steering bias based on obstacle zone.
         Positive = steer right, Negative = steer left
-        
+
         Args:
             zone (str): Obstacle zone
-            
+
         Returns:
             float: Steering bias (-1.0 to 1.0)
         """
@@ -173,66 +184,167 @@ class ObstacleAvoidanceSystem:
             return self.MICRO_ADJUST_STEERING
         else:
             return 0.0
-    
-    def calculate_strong_steering(self, zone):
+
+    def check_lane_change_safety(self, boxes, distances, obstacle_box, obstacle_distance):
         """
-        Calculate strong steering for hard nudge maneuver.
-        
+        Check if lane change is safe and determine which direction to change.
+
+        For a two-lane road where we're normally on the right:
+        - LEFT lane is PREFERRED (typically empty when we're on right)
+        - But also considers obstacle position and adjacent lane availability
+        - Smart fallback to right lane if left is blocked
+
+        Decision Priority:
+        1. Preferred lane (left) if clear
+        2. Opposite lane (right) if preferred blocked
+        3. Side with more space based on obstacle position
+        4. STOP if all options blocked
+
         Args:
-            zone (str): Obstacle zone
-            
+            boxes (list): All detected bounding boxes
+            distances (list): Distances to all obstacles
+            obstacle_box (tuple): The main obstacle we're avoiding
+            obstacle_distance (float): Distance to main obstacle
+
         Returns:
-            float: Steering value (-1.0 to 1.0)
+            tuple: (can_change, direction, reason)
+                   can_change (bool): Whether lane change is safe
+                   direction (int): -1 for left, +1 for right, 0 for none
+                   reason (str): Explanation of decision
         """
-        if zone == 'left_third' or zone == 'center_third':
-            return self.HARD_NUDGE_STEERING  # Steer right
-        elif zone == 'right_third':
-            return -self.HARD_NUDGE_STEERING  # Steer left
+        # Determine preferred direction based on which lane we normally drive in
+        if self.PREFERRED_LANE == 'right':
+            preferred_direction = -1  # Go left (we're on right, left is empty)
+            preferred_name = "LEFT"
+            opposite_direction = 1
+            opposite_name = "RIGHT"
         else:
-            return 0.0
+            preferred_direction = 1  # Go right (we're on left, right is empty)
+            preferred_name = "RIGHT"
+            opposite_direction = -1
+            opposite_name = "LEFT"
+
+        # Calculate obstacle position within our lane
+        x1, y1, x2, y2 = obstacle_box
+        obstacle_center = (x1 + x2) / 2
+        lane_center = (self.LEFT_LANE_X + self.RIGHT_LANE_X) / 2
+
+        # Is obstacle more to the left or right of our lane center?
+        obstacle_on_left_side = obstacle_center < lane_center
+
+        # Check for obstacles in adjacent lanes
+        left_lane_blocked = False
+        right_lane_blocked = False
+        left_lane_obstacle_count = 0
+        right_lane_obstacle_count = 0
+
+        for box, dist in zip(boxes, distances):
+            if dist <= 0 or dist > obstacle_distance + 1.5:  # Check obstacles within 1.5m
+                continue
+
+            bx1, by1, bx2, by2 = box
+            b_center = (bx1 + bx2) / 2
+
+            # Check if obstacle is in left adjacent lane (left of our left boundary)
+            if b_center < self.LEFT_LANE_X - 50:  # 50px margin to avoid edge detection
+                left_lane_blocked = True
+                left_lane_obstacle_count += 1
+
+            # Check if obstacle is in right adjacent lane (right of our right boundary)
+            if b_center > self.RIGHT_LANE_X + 50:  # 50px margin
+                right_lane_blocked = True
+                right_lane_obstacle_count += 1
+
+        # Decision logic with multiple factors
+        print(f"  🔍 Lane Safety Check:")
+        print(f"     Preferred: {preferred_name} lane")
+        print(f"     Left lane: {'BLOCKED ({} obstacles)'.format(left_lane_obstacle_count) if left_lane_blocked else 'CLEAR ✓'}")
+        print(f"     Right lane: {'BLOCKED ({} obstacles)'.format(right_lane_obstacle_count) if right_lane_blocked else 'CLEAR ✓'}")
+        print(f"     Obstacle position: {'LEFT side' if obstacle_on_left_side else 'RIGHT side'} of lane")
+
+        # Strategy 1: Try preferred lane first (usually LEFT when on RIGHT lane)
+        if preferred_direction == -1:  # Prefer LEFT
+            if not left_lane_blocked:
+                return True, -1, f"Overtaking {preferred_name} - preferred lane clear"
+            elif not right_lane_blocked:
+                # Preferred blocked, but opposite clear
+                if obstacle_on_left_side:
+                    # Obstacle on left, going right makes more sense anyway
+                    return True, 1, f"Overtaking {opposite_name} - obstacle on left, right lane clear"
+                else:
+                    # Obstacle on right, but left blocked, so go right
+                    return True, 1, f"Overtaking {opposite_name} - preferred blocked but opposite clear"
+            else:
+                # Both lanes blocked - STOP
+                return False, 0, "STOP - Both lanes blocked, cannot overtake safely"
+
+        else:  # Prefer RIGHT
+            if not right_lane_blocked:
+                return True, 1, f"Overtaking {preferred_name} - preferred lane clear"
+            elif not left_lane_blocked:
+                # Preferred blocked, but opposite clear
+                if not obstacle_on_left_side:  # obstacle on right
+                    # Obstacle on right, going left makes more sense anyway
+                    return True, -1, f"Overtaking {opposite_name} - obstacle on right, left lane clear"
+                else:
+                    # Obstacle on left, but right blocked, so go left
+                    return True, -1, f"Overtaking {opposite_name} - preferred blocked but opposite clear"
+            else:
+                # Both lanes blocked - STOP
+                return False, 0, "STOP - Both lanes blocked, cannot overtake safely"
     
-    def calculate_overtaking_durations(self, obstacle_distance, obstacle_width, zone):
+    
+    def calculate_overtaking_durations(self, obstacle_distance, obstacle_width, direction):
         """
         Calculate time durations for each phase of overtaking maneuver.
-        Uses fixed speeds to calculate timing.
-        
+        Uses FIXED distance for passing since we can't detect when we've passed the obstacle.
+
         Args:
             obstacle_distance (float): Distance to obstacle in meters
             obstacle_width (float): Width of obstacle in meters (estimated from box)
-            zone (str): Which zone the obstacle is in
-            
+            direction (int): -1 for left, +1 for right
+
         Returns:
             dict: Duration for each phase in seconds
         """
-        # Phase 1: Move laterally to avoid obstacle
-        vehicle_width = 0.2  # JetRacer width
-        safety_margin = 0.15  # 15cm safety clearance
-        lateral_clearance = (obstacle_width / 2) + safety_margin + (vehicle_width / 2)
+        # Phase 1: Move laterally to change lane
+        vehicle_width = 0.2  # JetRacer width (meters)
+        safety_margin = 0.2  # 20cm safety clearance
+
+        # Need to move one full lane width
+        lane_width_meters = self.LANE_WIDTH_PIXELS * 0.003  # Rough conversion: 1px ≈ 3mm at 1m distance
+        # Alternative: Use calibrated value (e.g., standard lane is ~3.5m, but JetRacer course might be smaller)
+        lane_width_meters = 0.4  # Typical miniature course lane width (adjust based on your setup)
+
+        lateral_clearance = lane_width_meters
         phase1_duration = lateral_clearance / self.LATERAL_SPEED
-        
-        # Phase 2: Pass the obstacle (go straight)
-        # Add extra distance to ensure we're past the obstacle
-        passing_distance = obstacle_distance + obstacle_width + 0.3  # 30cm extra
+
+        # Phase 2: Pass the obstacle (go straight in new lane)
+        # FIXED distance since we can't see when we've passed
+        # This should be enough to clear a stationary obstacle
+        passing_distance = self.LANE_CHANGE_PASS_DISTANCE  # 2.0 meters default
         phase2_duration = passing_distance / self.VEHICLE_SPEED
-        
+
         # Phase 3: Return to original lane (mirror of phase 1)
         phase3_duration = phase1_duration
-        
+
         total = phase1_duration + phase2_duration + phase3_duration
-        
-        print(f"  📊 Overtaking plan:")
-        print(f"    - Lateral clearance needed: {lateral_clearance:.2f}m")
-        print(f"    - Passing distance: {passing_distance:.2f}m")
-        print(f"    - Phase 1 (move over): {phase1_duration:.1f}s")
-        print(f"    - Phase 2 (pass): {phase2_duration:.1f}s")
-        print(f"    - Phase 3 (return): {phase3_duration:.1f}s")
+
+        direction_name = "LEFT" if direction < 0 else "RIGHT"
+        print(f"  📊 Overtaking plan ({direction_name}):")
+        print(f"    - Lane width: {lane_width_meters:.2f}m")
+        print(f"    - Fixed passing distance: {passing_distance:.2f}m")
+        print(f"    - Phase 1 (move to {direction_name} lane): {phase1_duration:.1f}s")
+        print(f"    - Phase 2 (pass straight): {phase2_duration:.1f}s")
+        print(f"    - Phase 3 (return to original lane): {phase3_duration:.1f}s")
         print(f"    - Total time: {total:.1f}s")
-        
+
         return {
             'phase1': phase1_duration,
             'phase2': phase2_duration,
             'phase3': phase3_duration,
-            'total': total
+            'total': total,
+            'direction': direction
         }
     
     def estimate_obstacle_width_from_box(self, box, distance):
@@ -259,144 +371,184 @@ class ObstacleAvoidanceSystem:
         
         return estimated_width
     
-    def decide_avoidance_action(self, box, distance):
+    def decide_avoidance_action(self, box, distance, boxes, distances):
         """
         Make avoidance decision based on obstacle position and distance.
-        
-        Two main strategies:
+
+        Three main strategies:
         1. MICRO_ADJUST: Small obstacle in A or C zone only → slight steering, keep lane
-        2. LANE_CHANGE: Obstacle touches B zone OR too large → full lane change maneuver
-        
+        2. LANE_CHANGE: Large obstacle → check if safe, then execute maneuver
+        3. STOP: Cannot avoid safely → stop and wait
+
         Args:
             box (tuple): Bounding box (x1, y1, x2, y2)
             distance (float): Distance to obstacle in meters
-            
+            boxes (list): All detected obstacles
+            distances (list): Distances to all obstacles
+
         Returns:
             tuple: (action_name, steering_value, throttle_value)
         """
         # Classify obstacle
         zone = self.classify_obstacle_zone(box)
         coverage = self.calculate_obstacle_coverage(box)
-        
+
         # Store for visualization
         self.obstacle_zone = zone
         self.obstacle_coverage = coverage
-        
+
         # If obstacle is outside our lane, ignore it
         if zone in ['left_outside', 'right_outside']:
             return 'IGNORE', 0.0, self.THROTTLE
-        
+
         # Decision logic:
         # MICRO_ADJUST: Small (<33% coverage) AND in outer zone (A or C) only
-        # LANE_CHANGE: Everything else (touches B or too large)
-        
+        # LANE_CHANGE or STOP: Everything else (touches B or too large)
+
         if coverage < self.MICRO_ADJUST_THRESHOLD and zone in ['left_third', 'right_third']:
             # Case 1: Small obstacle in A or C zone → micro adjustment, keep lane
             action = 'MICRO_ADJUST'
             steering = self.calculate_steering_bias(zone)
             throttle = self.THROTTLE
-            
+
             print(f"  → Decision: {action} (stay in lane)")
             print(f"     Zone: {zone} | Coverage: {coverage:.2%} | Steering: {steering:+.2f}")
-            
+
         else:
-            # Case 2: Obstacle in B zone OR large obstacle → full lane change
-            action = 'LANE_CHANGE'
-            
+            # Case 2: Obstacle in B zone OR large obstacle → check if lane change is safe
             reason = "touches center zone" if zone == 'center_third' else f"large obstacle ({coverage:.1%})"
-            print(f"  → Decision: {action} ({reason})")
-            print(f"     Zone: {zone} | Coverage: {coverage:.2%}")
-            
-            # Start timer-based overtaking
-            obstacle_width = self.estimate_obstacle_width_from_box(box, distance)
-            self.overtaking_durations = self.calculate_overtaking_durations(
-                distance, obstacle_width, zone
+
+            # Check if lane change is safe and which direction
+            can_change, direction, safety_reason = self.check_lane_change_safety(
+                boxes, distances, box, distance
             )
-            self.overtaking_state = 'MOVING_OVER'
-            self.overtaking_phase_start = time.time()
-            self.overtaking_initial_distance = distance
-            
-            # Determine direction based on zone
-            if zone == 'left_third' or zone == 'center_third':
-                steering = self.LANE_CHANGE_STEERING  # Move right
+
+            if can_change:
+                # Lane change is safe - execute maneuver
+                action = 'LANE_CHANGE'
+                self.can_change_lane = True
+                self.lane_change_direction = direction
+
+                print(f"  → Decision: {action} ({reason})")
+                print(f"     Zone: {zone} | Coverage: {coverage:.2%}")
+                print(f"     Safety check: {safety_reason}")
+
+                # Start timer-based overtaking
+                obstacle_width = self.estimate_obstacle_width_from_box(box, distance)
+                self.overtaking_durations = self.calculate_overtaking_durations(
+                    distance, obstacle_width, direction
+                )
+                self.overtaking_state = 'MOVING_OVER'
+                self.overtaking_phase_start = time.time()
+                self.overtaking_initial_distance = distance
+
+                # Steering based on determined direction
+                if direction < 0:  # Left
+                    steering = -self.LANE_CHANGE_STEERING
+                else:  # Right
+                    steering = self.LANE_CHANGE_STEERING
+
+                throttle = self.THROTTLE
+
             else:
-                steering = -self.LANE_CHANGE_STEERING  # Move left
-            
-            throttle = self.THROTTLE
-        
+                # Cannot change lane safely - STOP
+                action = 'STOP'
+                self.can_change_lane = False
+                steering = 0.0
+                throttle = 0.0  # STOP
+
+                print(f"  → Decision: {action} ({reason})")
+                print(f"     Zone: {zone} | Coverage: {coverage:.2%}")
+                print(f"     Safety check: {safety_reason}")
+                print(f"     ⚠️  STOPPING - Cannot overtake safely!")
+
         return action, steering, throttle
     
     def update_overtaking_state(self):
         """
         Update timer-based overtaking state machine.
         Returns updated steering and throttle based on current phase.
-        
+
+        Three phases:
+        1. MOVING_OVER: Change to adjacent lane (steer left/right)
+        2. PASSING: Go straight in new lane for fixed distance
+        3. RETURNING: Return to original lane (steer opposite direction)
+
+        LKAS should be DISABLED during phases 1 and 3, ENABLED during phase 2.
+
         Returns:
-            tuple: (steering, throttle, state_name)
+            tuple: (steering, throttle, state_name, enable_lkas)
         """
         if self.overtaking_state == 'NORMAL':
-            return 0.0, self.THROTTLE, 'NORMAL'
-        
+            return 0.0, self.THROTTLE, 'NORMAL', True  # LKAS enabled in normal state
+
         elapsed = time.time() - self.overtaking_phase_start
-        
+        direction = self.overtaking_durations.get('direction', self.lane_change_direction)
+
         if self.overtaking_state == 'MOVING_OVER':
-            # Phase 1: Move laterally
+            # Phase 1: Move laterally to adjacent lane
             if elapsed > self.overtaking_durations['phase1']:
                 self.overtaking_state = 'PASSING'
                 self.overtaking_phase_start = time.time()
-                print("  ✓ Phase 1 complete → Phase 2: Passing")
-                return 0.0, self.THROTTLE, 'PASSING'
-            
-            # Continue moving over
-            # Steering direction was set in decide_avoidance_action
-            return self.current_steering, self.THROTTLE, 'MOVING_OVER'
-        
+                print("  ✓ Phase 1 complete → Phase 2: Passing in new lane")
+                print("  ℹ️  LKAS can now engage in new lane")
+                return 0.0, self.THROTTLE, 'PASSING', True  # Enable LKAS in new lane
+
+            # Continue moving over - LKAS should be disabled
+            steering = -self.LANE_CHANGE_STEERING if direction < 0 else self.LANE_CHANGE_STEERING
+            return steering, self.THROTTLE, 'MOVING_OVER', False  # Disable LKAS while changing
+
         elif self.overtaking_state == 'PASSING':
-            # Phase 2: Go straight past obstacle
+            # Phase 2: Go straight in new lane - LKAS keeps us centered
             if elapsed > self.overtaking_durations['phase2']:
                 self.overtaking_state = 'RETURNING'
                 self.overtaking_phase_start = time.time()
-                print("  ✓ Phase 2 complete → Phase 3: Returning")
-                # Return in opposite direction
-                return -self.current_steering, self.THROTTLE, 'RETURNING'
-            
-            # Continue going straight
-            return 0.0, self.THROTTLE, 'PASSING'
-        
+                print("  ✓ Phase 2 complete → Phase 3: Returning to original lane")
+                print("  ℹ️  LKAS will be disabled during lane return")
+                # Return in OPPOSITE direction to get back to original lane
+                return_steering = self.LANE_CHANGE_STEERING if direction < 0 else -self.LANE_CHANGE_STEERING
+                return return_steering, self.THROTTLE, 'RETURNING', False  # Disable LKAS
+
+            # Continue going straight - LKAS keeps us in new lane
+            return 0.0, self.THROTTLE, 'PASSING', True  # LKAS enabled
+
         elif self.overtaking_state == 'RETURNING':
-            # Phase 3: Return to original lane
+            # Phase 3: Return to original lane (opposite steering from phase 1)
             if elapsed > self.overtaking_durations['phase3']:
                 self.overtaking_state = 'NORMAL'
                 self.decision_made = False
-                print("  ✓ Phase 3 complete → Overtaking finished!")
-                return 0.0, self.THROTTLE, 'NORMAL'
-            
-            # Continue returning (steering already set to opposite direction)
-            return -self.current_steering, self.THROTTLE, 'RETURNING'
-        
-        return 0.0, self.THROTTLE, 'NORMAL'
+                print("  ✓ Phase 3 complete → Back in original lane!")
+                print("  ℹ️  LKAS re-enabled in original lane")
+                return 0.0, self.THROTTLE, 'NORMAL', True  # LKAS enabled in original lane
+
+            # Continue returning - steer opposite direction from phase 1
+            return_steering = self.LANE_CHANGE_STEERING if direction < 0 else -self.LANE_CHANGE_STEERING
+            return return_steering, self.THROTTLE, 'RETURNING', False  # Disable LKAS
+
+        return 0.0, self.THROTTLE, 'NORMAL', True
     
     def process_obstacles(self, detections, distances, boxes):
         """
         Process all detected obstacles and make avoidance decisions.
         Uses hysteresis to prevent oscillation.
         Now includes timer-based overtaking for LANE_CHANGE maneuvers.
-        
+
         Args:
             detections (list): List of detection results
             distances (list): List of distances for each detection
             boxes (list): List of bounding boxes
-            
+
         Returns:
-            tuple: (action, steering, throttle)
+            tuple: (action, steering, throttle, enable_lkas)
+                   enable_lkas: Whether LKAS should be enabled (False during lane changes)
         """
         # If currently in overtaking maneuver, continue with timer-based control
         if self.overtaking_state != 'NORMAL':
-            steering, throttle, state = self.update_overtaking_state()
+            steering, throttle, state, enable_lkas = self.update_overtaking_state()
             self.current_action = f'LANE_CHANGE_{state}'
             self.current_steering = steering
             self.current_throttle = throttle
-            return self.current_action, steering, throttle
+            return self.current_action, steering, throttle, enable_lkas
         
         # If no detections, return to normal
         if len(detections) == 0:
@@ -407,14 +559,18 @@ class ObstacleAvoidanceSystem:
                 self.current_steering = 0.0
                 self.current_throttle = self.THROTTLE
                 print("No obstacles detected - returning to normal operation")
-            
-            return self.current_action, self.current_steering, self.current_throttle
+
+            return self.current_action, self.current_steering, self.current_throttle, True  # LKAS enabled
         
         # Find closest valid obstacle
         closest_distance = float('inf')
         closest_box = None
         closest_valid = False
-        
+
+        # Store all obstacles for lane change safety check
+        all_boxes = boxes
+        all_distances = distances
+
         for distance, box in zip(distances, boxes):
             if distance > 0 and distance < closest_distance:
                 closest_distance = distance
@@ -428,7 +584,7 @@ class ObstacleAvoidanceSystem:
                 self.current_action = 'NORMAL'
                 self.current_steering = 0.0
                 self.current_throttle = self.THROTTLE
-            return self.current_action, self.current_steering, self.current_throttle
+            return self.current_action, self.current_steering, self.current_throttle, True  # LKAS enabled
         
         # Smooth the distance
         smoothed_distance = self.smooth_distance(closest_distance)
@@ -444,40 +600,53 @@ class ObstacleAvoidanceSystem:
                 self.current_steering = 0.0
                 self.current_throttle = self.THROTTLE
                 self.distance_history.clear()  # Clear history for next obstacle
-        
+
         # ENTERING decision zone - make decision ONCE
         elif smoothed_distance < self.DECISION_ENTER and not self.decision_made:
             print(f"\n[DECISION] Obstacle at {smoothed_distance:.2f}m - Making decision...")
             action, steering, throttle = self.decide_avoidance_action(
-                closest_box, smoothed_distance
+                closest_box, smoothed_distance, all_boxes, all_distances
             )
-            
+
             # Lock the decision (except for LANE_CHANGE which uses its own state machine)
-            if action != 'LANE_CHANGE':
+            if action not in ['LANE_CHANGE', 'STOP']:
                 self.decision_made = True
-            
+            elif action == 'STOP':
+                # STOP is also locked until obstacle clears
+                self.decision_made = True
+
             self.current_action = action
             self.current_steering = steering
             self.current_throttle = throttle
             self.decision_timestamp = time.time()
-            
+
             if action == 'LANE_CHANGE':
                 print(f"[LANE_CHANGE] Starting timer-based overtaking maneuver")
+            elif action == 'STOP':
+                print(f"[STOP] Vehicle will stop until obstacle clears")
             else:
                 print(f"[HYSTERESIS] Decision locked: {action}")
-        
+
         # IN decision zone - continue current action
         elif self.decision_made:
             # Decision already made, continue executing
             pass
-        
+
         # Outside decision zone - just monitor
         else:
             self.current_action = 'MONITOR'
             self.current_steering = 0.0
             self.current_throttle = self.THROTTLE
-        
-        return self.current_action, self.current_steering, self.current_throttle
+
+        # Determine if LKAS should be enabled
+        # Disable LKAS during MICRO_ADJUST (we're adding bias) and STOP
+        # LKAS is managed by state machine during LANE_CHANGE
+        if self.current_action in ['MICRO_ADJUST', 'STOP']:
+            enable_lkas = False
+        else:
+            enable_lkas = True
+
+        return self.current_action, self.current_steering, self.current_throttle, enable_lkas
     
     def draw_lane_overlay(self, frame):
         """
@@ -548,8 +717,9 @@ class ObstacleAvoidanceSystem:
             'MICRO_ADJUST': (255, 255, 0), # Cyan - stay in lane
             'LANE_CHANGE': (0, 0, 255),    # Red - full lane change
             'LANE_CHANGE_MOVING_OVER': (0, 0, 255),  # Red
-            'LANE_CHANGE_PASSING': (0, 0, 255),      # Red
+            'LANE_CHANGE_PASSING': (0, 165, 255),     # Orange - LKAS active in new lane
             'LANE_CHANGE_RETURNING': (0, 0, 255),    # Red
+            'STOP': (0, 0, 255),           # Red - emergency stop
             'IGNORE': (128, 128, 128)      # Gray
         }
         
@@ -591,6 +761,13 @@ class ObstacleAvoidanceSystem:
                        (400, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
             cv2.putText(panel, f"Coverage: {self.obstacle_coverage:.1%}",
                        (400, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+
+        # Draw lane change direction if active
+        if self.lane_change_direction != 0:
+            direction_text = "→ LEFT" if self.lane_change_direction < 0 else "RIGHT →"
+            direction_color = (0, 255, 255) if self.lane_change_direction < 0 else (255, 0, 255)
+            cv2.putText(panel, f"Direction: {direction_text}",
+                       (400, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, direction_color, 2)
         
         # Combine with main frame
         result = np.vstack([frame, panel])
