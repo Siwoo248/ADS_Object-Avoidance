@@ -29,16 +29,16 @@ class ObstacleAvoidanceSystem:
         
         # ========== CALIBRATION PARAMETERS ==========
         # TODO: Calibrate these by driving and observing lane positions in pixels
-        self.LEFT_LANE_X = 180      # Left lane boundary (pixels)
-        self.RIGHT_LANE_X = 460     # Right lane boundary (pixels)
+        self.LEFT_LANE_X = 260      # Left lane boundary (pixels)
+        self.RIGHT_LANE_X = 380     # Right lane boundary (pixels)
         self.LANE_WIDTH_PIXELS = self.RIGHT_LANE_X - self.LEFT_LANE_X
 
         # Distance thresholds (meters)
-        self.CRITICAL_DISTANCE = 0.5    # Make decision at this distance
+        self.CRITICAL_DISTANCE = 0.7    # Make decision at this distance
 
         # Hysteresis thresholds to prevent oscillation
-        self.DECISION_ENTER = 0.5       # Trigger decision
-        self.DECISION_EXIT = 0.6        # Clear decision (must be > DECISION_ENTER)
+        self.DECISION_ENTER = 0.7       # Trigger decision
+        self.DECISION_EXIT = 0.8        # Clear decision (must be > DECISION_ENTER)
 
         # Coverage thresholds (what fraction of lane the obstacle blocks)
         self.MICRO_ADJUST_THRESHOLD = 0.33   # < 33% of lane in A or C → micro adjust

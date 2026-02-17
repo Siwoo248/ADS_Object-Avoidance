@@ -60,6 +60,9 @@ from ultralytics import YOLO
 # Import the obstacle avoidance system
 from obstacle_avoidance import ObstacleAvoidanceSystem
 
+# Import web viewer
+from yolo_web_viewer import YOLOWebViewer
+
 # Load configuration values directly from config file
 config_path = parent_dir / "config.py"
 spec = importlib.util.spec_from_file_location("config", config_path)
@@ -101,7 +104,8 @@ class YOLODepthDetectorWithAvoidance:
 
     def __init__(self, model_path=MODEL_PATH, device=0,
                  conf_threshold=CONFIDENCE_THRESHOLD, iou_threshold=IOU_THRESHOLD,
-                 enable_motor_control=False, enable_lkas_integration=True):
+                 enable_motor_control=False, enable_lkas_integration=True,
+                 web_port=8082, enable_display=True):
         """
         Initialize the YOLO depth detector with avoidance and LKAS integration.
 
@@ -211,6 +215,17 @@ class YOLODepthDetectorWithAvoidance:
                 print("\nMotor control DISABLED - JetRacer library not available (simulation mode)")
             else:
                 print("\nMotor control DISABLED - Set enable_motor_control=True to enable")
+
+        # Web viewer
+        self.enable_display = enable_display
+        self.web_viewer = None
+        if web_port > 0:
+            self.web_viewer = YOLOWebViewer(
+                http_port=web_port,
+                avoidance=self.avoidance,
+                detector=self,
+            )
+            self.web_viewer.start()
 
         # FPS tracking
         self.fps = 0
@@ -581,20 +596,40 @@ class YOLODepthDetectorWithAvoidance:
 
                 frame_count += 1
 
-                # Display frame
-                cv2.imshow("YOLO Detection with Obstacle Avoidance", annotated_frame)
+                # Broadcast to web viewer
+                if self.web_viewer:
+                    self.web_viewer.broadcast_frame(annotated_frame)
+                    self.web_viewer.broadcast_status({
+                        'fps': self.fps,
+                        'action': action,
+                        'steering': avoidance_steering,
+                        'throttle': throttle,
+                        'nearest_distance': nearest_distance,
+                        'overtaking_state': self.avoidance.overtaking_state,
+                        'lane_detected': lane_detected,
+                        'lkas_steering': lkas_steering,
+                        'left_lane_x': self.avoidance.LEFT_LANE_X,
+                        'right_lane_x': self.avoidance.RIGHT_LANE_X,
+                    })
+
+                # Display frame (can be disabled with --no-display for headless mode)
+                if self.enable_display:
+                    cv2.imshow("YOLO Detection with Obstacle Avoidance", annotated_frame)
 
                 # Clear GPU cache every frame
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
 
-                # Handle key presses
-                key = cv2.waitKey(1) & 0xFF
-                if key == ord('q'):
-                    break
-                elif key == ord('r'):
-                    print("\n[USER] Resetting avoidance system...")
-                    self.avoidance.reset()
+                # Handle key presses (only when display is enabled)
+                if self.enable_display:
+                    key = cv2.waitKey(1) & 0xFF
+                    if key == ord('q'):
+                        break
+                    elif key == ord('r'):
+                        print("\n[USER] Resetting avoidance system...")
+                        self.avoidance.reset()
+                else:
+                    time.sleep(0.001)
 
         except KeyboardInterrupt:
             print("\nInterrupted by user")
@@ -640,7 +675,15 @@ class YOLODepthDetectorWithAvoidance:
         except Exception:
             pass
 
-        cv2.destroyAllWindows()
+        # Stop web viewer
+        if self.web_viewer:
+            try:
+                self.web_viewer.stop()
+            except Exception:
+                pass
+
+        if self.enable_display:
+            cv2.destroyAllWindows()
         print("Done!")
 
 
@@ -659,6 +702,10 @@ def main():
                         help='Confidence threshold')
     parser.add_argument('--iou', type=float, default=IOU_THRESHOLD,
                         help='IOU threshold')
+    parser.add_argument('--web-port', type=int, default=8082,
+                        help='Web viewer HTTP port (default: 8082, 0 to disable)')
+    parser.add_argument('--no-display', action='store_true',
+                        help='Disable cv2 display (headless mode, web viewer only)')
 
     args = parser.parse_args()
 
@@ -669,6 +716,8 @@ def main():
     print(f"Motor Control: {'ENABLED' if args.motors else 'DISABLED'}")
     print(f"LKAS Integration: {'DISABLED' if args.no_lkas else 'ENABLED'}")
     print(f"Confidence: {args.conf}, IOU: {args.iou}")
+    print(f"Web Viewer: {'port ' + str(args.web_port) if args.web_port > 0 else 'DISABLED'}")
+    print(f"CV Display: {'DISABLED' if args.no_display else 'ENABLED'}")
     print("=" * 60 + "\n")
 
     # Pre-flight check: show which shared memory segments exist
@@ -698,7 +747,9 @@ def main():
             conf_threshold=args.conf,
             iou_threshold=args.iou,
             enable_motor_control=args.motors,
-            enable_lkas_integration=not args.no_lkas
+            enable_lkas_integration=not args.no_lkas,
+            web_port=args.web_port,
+            enable_display=not args.no_display,
         )
         detector.run()
     except Exception as e:

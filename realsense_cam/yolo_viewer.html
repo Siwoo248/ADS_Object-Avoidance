@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>YOLO Obstacle Avoidance Viewer</title>
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            margin: 0; padding: 0;
+            background: #0a0a0a; color: #fff;
+            font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif;
+            font-size: 14px; line-height: 1.5;
+        }
+        h1 {
+            margin: 0; padding: 16px 24px;
+            font-size: 15px; font-weight: 500;
+            letter-spacing: 0.5px; text-transform: uppercase;
+            background: #111; border-bottom: 1px solid #222;
+        }
+        .main { display: flex; width: 100%; border-bottom: 1px solid #222; }
+        .video-container {
+            position: relative; flex: 1;
+            background: #000; overflow: hidden;
+            border-right: 1px solid #222;
+        }
+        canvas { width: 100%; height: auto; display: block; }
+        .no-signal {
+            position: absolute; top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            color: #555; font-size: 14px; text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        .sidebar {
+            width: 320px; background: #0f0f0f;
+            display: flex; flex-direction: column;
+            overflow-y: auto; max-height: 100vh;
+        }
+        .section-title {
+            margin: 0; padding: 10px 16px;
+            font-size: 11px; font-weight: 600;
+            letter-spacing: 1px; text-transform: uppercase;
+            color: #888; background: #111;
+            border-bottom: 1px solid #222;
+        }
+        .hud-item {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 8px 16px; font-size: 13px;
+            border-bottom: 1px solid #1a1a1a;
+        }
+        .hud-item .label {
+            color: #777; font-size: 11px;
+            text-transform: uppercase; letter-spacing: 0.5px;
+        }
+        .hud-item .value {
+            font-family: 'Courier New', monospace;
+            color: #e0e0e0; font-size: 14px;
+        }
+        .action-normal { color: #4caf50; }
+        .action-monitor { color: #ffeb3b; }
+        .action-stop { color: #f44336; }
+        .action-avoid { color: #ff9800; }
+        .action-lane { color: #e91e63; }
+
+        /* Controls */
+        .controls {
+            padding: 12px 24px; background: #111;
+            border-bottom: 1px solid #222;
+            display: flex; gap: 8px; flex-wrap: wrap;
+        }
+        .btn {
+            padding: 7px 14px; background: #1a1a1a;
+            border: 1px solid #2a2a2a; color: #ccc;
+            cursor: pointer; font-size: 12px; font-weight: 500;
+            text-transform: uppercase; letter-spacing: 0.5px;
+        }
+        .btn:hover { background: #222; border-color: #3a3a3a; color: #fff; }
+        .btn.warning { border-color: #553; color: #cc9; }
+        .btn.warning:hover { background: #332; border-color: #774; }
+
+        /* Sliders */
+        .param-section {
+            padding: 0; border-bottom: 1px solid #222;
+        }
+        .param-group {
+            padding: 8px 16px; border-bottom: 1px solid #1a1a1a;
+        }
+        .param-group:last-child { border-bottom: none; }
+        .param-label {
+            display: flex; justify-content: space-between; align-items: center;
+            margin-bottom: 4px;
+        }
+        .param-label .name {
+            color: #888; font-size: 11px;
+            text-transform: uppercase; letter-spacing: 0.5px;
+        }
+        .param-label .val {
+            font-family: 'Courier New', monospace;
+            color: #e0e0e0; font-size: 12px;
+            min-width: 50px; text-align: right;
+        }
+        input[type="range"] {
+            width: 100%; height: 4px;
+            -webkit-appearance: none; appearance: none;
+            background: #333; outline: none;
+            border-radius: 2px;
+        }
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none; appearance: none;
+            width: 14px; height: 14px;
+            background: #fff; border-radius: 50%;
+            cursor: pointer;
+        }
+        input[type="range"]::-moz-range-thumb {
+            width: 14px; height: 14px;
+            background: #fff; border-radius: 50%;
+            cursor: pointer; border: none;
+        }
+        select {
+            background: #1a1a1a; color: #ccc;
+            border: 1px solid #333; padding: 4px 8px;
+            font-size: 12px; width: 100%;
+        }
+
+        /* Connection status */
+        .conn-status {
+            padding: 6px 16px; font-size: 11px;
+            text-transform: uppercase; letter-spacing: 0.5px;
+            border-bottom: 1px solid #222;
+        }
+        .conn-status.connected { color: #4caf50; background: #0a1a0a; }
+        .conn-status.disconnected { color: #f44336; background: #1a0a0a; }
+
+        /* Notification */
+        .notification {
+            position: fixed; top: 20px; right: 20px;
+            background: #fff; color: #000;
+            padding: 10px 18px; border: 1px solid #fff;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+            opacity: 0; transition: opacity 0.2s;
+            z-index: 1000; font-size: 12px;
+            font-weight: 500; text-transform: uppercase;
+        }
+    </style>
+</head>
+<body>
+    <h1>YOLO Obstacle Avoidance</h1>
+
+    <div class="controls">
+        <button class="btn warning" onclick="sendAction('reset')">Reset Avoidance</button>
+    </div>
+
+    <div class="main">
+        <div class="video-container">
+            <canvas id="canvas"></canvas>
+            <div class="no-signal" id="noSignal">No Signal</div>
+        </div>
+        <div class="sidebar">
+            <div class="conn-status disconnected" id="connStatus">Disconnected</div>
+
+            <!-- Status -->
+            <div class="section-title">Status</div>
+            <div class="hud-item"><span class="label">FPS</span><span class="value" id="fps">--</span></div>
+            <div class="hud-item"><span class="label">Action</span><span class="value" id="action">--</span></div>
+            <div class="hud-item"><span class="label">Overtaking</span><span class="value" id="overtaking">--</span></div>
+            <div class="hud-item"><span class="label">Steering</span><span class="value" id="steering">--</span></div>
+            <div class="hud-item"><span class="label">Throttle</span><span class="value" id="throttle">--</span></div>
+            <div class="hud-item"><span class="label">Nearest</span><span class="value" id="nearest">--</span></div>
+            <div class="hud-item"><span class="label">LKAS</span><span class="value" id="lkas">--</span></div>
+            <div class="hud-item"><span class="label">Lane</span><span class="value" id="lane">--</span></div>
+
+            <!-- Lane Boundaries -->
+            <div class="param-section">
+                <div class="section-title">Lane Boundaries</div>
+                <div class="param-group">
+                    <div class="param-label">
+                        <span class="name">Left Lane X</span>
+                        <span class="val" id="LEFT_LANE_X_val">{{LEFT_LANE_X}}</span>
+                    </div>
+                    <input type="range" id="LEFT_LANE_X" min="0" max="{{frame_width}}" step="1"
+                           value="{{LEFT_LANE_X}}" oninput="onSlider(this)">
+                </div>
+                <div class="param-group">
+                    <div class="param-label">
+                        <span class="name">Right Lane X</span>
+                        <span class="val" id="RIGHT_LANE_X_val">{{RIGHT_LANE_X}}</span>
+                    </div>
+                    <input type="range" id="RIGHT_LANE_X" min="0" max="{{frame_width}}" step="1"
+                           value="{{RIGHT_LANE_X}}" oninput="onSlider(this)">
+                </div>
+                <div class="param-group">
+                    <div class="param-label">
+                        <span class="name">Preferred Lane</span>
+                        <span class="val" id="PREFERRED_LANE_val">{{PREFERRED_LANE}}</span>
+                    </div>
+                    <select id="PREFERRED_LANE" onchange="onSelect(this)">
+                        <option value="right">Right</option>
+                        <option value="left">Left</option>
+                    </select>
+                </div>
+            </div>
+
+            <!-- Distance Thresholds -->
+            <div class="param-section">
+                <div class="section-title">Distance Thresholds (m)</div>
+                <div class="param-group">
+                    <div class="param-label">
+                        <span class="name">Critical Distance</span>
+                        <span class="val" id="CRITICAL_DISTANCE_val">{{CRITICAL_DISTANCE}}</span>
+                    </div>
+                    <input type="range" id="CRITICAL_DISTANCE" min="0.1" max="3.0" step="0.05"
+                           value="{{CRITICAL_DISTANCE}}" oninput="onSlider(this)">
+                </div>
+                <div class="param-group">
+                    <div class="param-label">
+                        <span class="name">Decision Enter</span>
+                        <span class="val" id="DECISION_ENTER_val">{{DECISION_ENTER}}</span>
+                    </div>
+                    <input type="range" id="DECISION_ENTER" min="0.1" max="3.0" step="0.05"
+                           value="{{DECISION_ENTER}}" oninput="onSlider(this)">
+                </div>
+                <div class="param-group">
+                    <div class="param-label">
+                        <span class="name">Decision Exit</span>
+                        <span class="val" id="DECISION_EXIT_val">{{DECISION_EXIT}}</span>
+                    </div>
+                    <input type="range" id="DECISION_EXIT" min="0.1" max="3.0" step="0.05"
+                           value="{{DECISION_EXIT}}" oninput="onSlider(this)">
+                </div>
+            </div>
+
+            <!-- Steering & Throttle -->
+            <div class="param-section">
+                <div class="section-title">Steering & Throttle</div>
+                <div class="param-group">
+                    <div class="param-label">
+                        <span class="name">Micro Adjust Steering</span>
+                        <span class="val" id="MICRO_ADJUST_STEERING_val">{{MICRO_ADJUST_STEERING}}</span>
+                    </div>
+                    <input type="range" id="MICRO_ADJUST_STEERING" min="0.05" max="1.0" step="0.05"
+                           value="{{MICRO_ADJUST_STEERING}}" oninput="onSlider(this)">
+                </div>
+                <div class="param-group">
+                    <div class="param-label">
+                        <span class="name">Lane Change Steering</span>
+                        <span class="val" id="LANE_CHANGE_STEERING_val">{{LANE_CHANGE_STEERING}}</span>
+                    </div>
+                    <input type="range" id="LANE_CHANGE_STEERING" min="0.05" max="1.0" step="0.05"
+                           value="{{LANE_CHANGE_STEERING}}" oninput="onSlider(this)">
+                </div>
+                <div class="param-group">
+                    <div class="param-label">
+                        <span class="name">Throttle</span>
+                        <span class="val" id="THROTTLE_val">{{THROTTLE}}</span>
+                    </div>
+                    <input type="range" id="THROTTLE" min="0.0" max="1.0" step="0.05"
+                           value="{{THROTTLE}}" oninput="onSlider(this)">
+                </div>
+                <div class="param-group">
+                    <div class="param-label">
+                        <span class="name">Micro Adjust Threshold</span>
+                        <span class="val" id="MICRO_ADJUST_THRESHOLD_val">{{MICRO_ADJUST_THRESHOLD}}</span>
+                    </div>
+                    <input type="range" id="MICRO_ADJUST_THRESHOLD" min="0.1" max="0.9" step="0.05"
+                           value="{{MICRO_ADJUST_THRESHOLD}}" oninput="onSlider(this)">
+                </div>
+            </div>
+
+            <!-- Overtaking -->
+            <div class="param-section">
+                <div class="section-title">Overtaking</div>
+                <div class="param-group">
+                    <div class="param-label">
+                        <span class="name">Pass Distance (m)</span>
+                        <span class="val" id="LANE_CHANGE_PASS_DISTANCE_val">{{LANE_CHANGE_PASS_DISTANCE}}</span>
+                    </div>
+                    <input type="range" id="LANE_CHANGE_PASS_DISTANCE" min="0.1" max="3.0" step="0.1"
+                           value="{{LANE_CHANGE_PASS_DISTANCE}}" oninput="onSlider(this)">
+                </div>
+                <div class="param-group">
+                    <div class="param-label">
+                        <span class="name">Vehicle Speed (m/s)</span>
+                        <span class="val" id="VEHICLE_SPEED_val">{{VEHICLE_SPEED}}</span>
+                    </div>
+                    <input type="range" id="VEHICLE_SPEED" min="0.05" max="1.0" step="0.05"
+                           value="{{VEHICLE_SPEED}}" oninput="onSlider(this)">
+                </div>
+                <div class="param-group">
+                    <div class="param-label">
+                        <span class="name">Lateral Speed (m/s)</span>
+                        <span class="val" id="LATERAL_SPEED_val">{{LATERAL_SPEED}}</span>
+                    </div>
+                    <input type="range" id="LATERAL_SPEED" min="0.05" max="1.0" step="0.05"
+                           value="{{LATERAL_SPEED}}" oninput="onSlider(this)">
+                </div>
+            </div>
+
+            <!-- YOLO Settings -->
+            <div class="param-section">
+                <div class="section-title">YOLO Settings</div>
+                <div class="param-group">
+                    <div class="param-label">
+                        <span class="name">Confidence Threshold</span>
+                        <span class="val" id="conf_threshold_val">{{conf_threshold}}</span>
+                    </div>
+                    <input type="range" id="conf_threshold" min="0.1" max="0.95" step="0.05"
+                           value="{{conf_threshold}}" oninput="onSlider(this)">
+                </div>
+                <div class="param-group">
+                    <div class="param-label">
+                        <span class="name">IOU Threshold</span>
+                        <span class="val" id="iou_threshold_val">{{iou_threshold}}</span>
+                    </div>
+                    <input type="range" id="iou_threshold" min="0.1" max="0.95" step="0.05"
+                           value="{{iou_threshold}}" oninput="onSlider(this)">
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="notification" id="notification"></div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const noSignal = document.getElementById('noSignal');
+        const connStatus = document.getElementById('connStatus');
+        const notification = document.getElementById('notification');
+
+        let ws = null;
+        let frameReceived = false;
+        let reconnectTimer = null;
+
+        // Set preferred lane select to current value
+        const prefSelect = document.getElementById('PREFERRED_LANE');
+        if (prefSelect) prefSelect.value = '{{PREFERRED_LANE}}';
+
+        function connect() {
+            const wsHost = window.location.hostname || 'localhost';
+            const wsPort = {{WS_PORT}};
+            const wsUrl = 'ws://' + wsHost + ':' + wsPort;
+
+            ws = new WebSocket(wsUrl);
+            ws.binaryType = 'arraybuffer';
+
+            ws.onopen = function() {
+                connStatus.textContent = 'Connected';
+                connStatus.className = 'conn-status connected';
+                if (reconnectTimer) {
+                    clearTimeout(reconnectTimer);
+                    reconnectTimer = null;
+                }
+            };
+
+            ws.onclose = function() {
+                connStatus.textContent = 'Disconnected';
+                connStatus.className = 'conn-status disconnected';
+                scheduleReconnect();
+            };
+
+            ws.onerror = function() {
+                connStatus.textContent = 'Error';
+                connStatus.className = 'conn-status disconnected';
+            };
+
+            ws.onmessage = function(event) {
+                if (event.data instanceof ArrayBuffer) {
+                    // Binary frame
+                    const blob = new Blob([event.data], { type: 'image/jpeg' });
+                    createImageBitmap(blob).then(function(bitmap) {
+                        if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
+                            canvas.width = bitmap.width;
+                            canvas.height = bitmap.height;
+                        }
+                        ctx.drawImage(bitmap, 0, 0);
+                        bitmap.close();
+
+                        if (!frameReceived) {
+                            frameReceived = true;
+                            noSignal.style.display = 'none';
+                        }
+                    });
+                } else {
+                    // JSON status
+                    try {
+                        const data = JSON.parse(event.data);
+                        if (data.type === 'status') {
+                            updateStatus(data);
+                        }
+                    } catch (e) {}
+                }
+            };
+        }
+
+        function scheduleReconnect() {
+            if (!reconnectTimer) {
+                reconnectTimer = setTimeout(function() {
+                    reconnectTimer = null;
+                    connect();
+                }, 2000);
+            }
+        }
+
+        function updateStatus(data) {
+            setText('fps', data.fps != null ? data.fps.toFixed(1) : '--');
+
+            const actionEl = document.getElementById('action');
+            const action = data.action || '--';
+            actionEl.textContent = action;
+            actionEl.className = 'value ' + getActionClass(action);
+
+            setText('overtaking', data.overtaking_state || 'NORMAL');
+            setText('steering', data.steering != null ? (data.steering >= 0 ? '+' : '') + data.steering.toFixed(2) : '--');
+            setText('throttle', data.throttle != null ? data.throttle.toFixed(2) : '--');
+            setText('nearest', data.nearest_distance != null && data.nearest_distance > 0
+                ? data.nearest_distance.toFixed(2) + 'm' : '--');
+            setText('lkas', data.lane_detected ? 'ON (' + (data.lkas_steering >= 0 ? '+' : '') +
+                data.lkas_steering.toFixed(2) + ')' : 'NO LANES');
+            setText('lane', 'L:' + (data.left_lane_x || '--') + ' R:' + (data.right_lane_x || '--'));
+        }
+
+        function setText(id, text) {
+            const el = document.getElementById(id);
+            if (el) el.textContent = text;
+        }
+
+        function getActionClass(action) {
+            if (!action) return '';
+            if (action === 'NORMAL') return 'action-normal';
+            if (action === 'MONITOR') return 'action-monitor';
+            if (action === 'STOP') return 'action-stop';
+            if (action.startsWith('LANE_CHANGE')) return 'action-lane';
+            if (action === 'MICRO_ADJUST') return 'action-avoid';
+            return '';
+        }
+
+        function onSlider(el) {
+            const name = el.id;
+            const value = parseFloat(el.value);
+            document.getElementById(name + '_val').textContent =
+                Number.isInteger(value) ? value : value.toFixed(2);
+            sendParameter(name, value);
+        }
+
+        function onSelect(el) {
+            const name = el.id;
+            const value = el.value;
+            document.getElementById(name + '_val').textContent = value;
+            sendParameter(name, value);
+        }
+
+        function sendParameter(name, value) {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'parameter', name: name, value: value }));
+            }
+        }
+
+        function sendAction(action) {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'action', action: action }));
+                showNotification(action.toUpperCase());
+            }
+        }
+
+        function showNotification(text) {
+            notification.textContent = text;
+            notification.style.opacity = '1';
+            setTimeout(function() { notification.style.opacity = '0'; }, 1500);
+        }
+
+        // Start connection
+        connect();
+    </script>
+</body>
+</html>
