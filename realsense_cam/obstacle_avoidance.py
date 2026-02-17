@@ -116,29 +116,32 @@ class ObstacleAvoidanceSystem:
     def classify_obstacle_zone(self, box):
         """
         Classify which third of the lane the obstacle is in.
-        
+        Uses bounding box overlap with the lane, not just the center point.
+
         Args:
             box (tuple): Bounding box (x1, y1, x2, y2)
-            
+
         Returns:
             str: 'left_third', 'center_third', or 'right_third'
         """
         x1, y1, x2, y2 = box
-        obstacle_center_x = (x1 + x2) / 2
-        
-        # Calculate position relative to lane
+
+        # Check if any part of the box overlaps with the lane
+        if x2 < self.LEFT_LANE_X:
+            return 'left_outside'
+        elif x1 > self.RIGHT_LANE_X:
+            return 'right_outside'
+
+        # Clamp box edges to lane boundaries to get the overlapping portion
+        overlap_left = max(x1, self.LEFT_LANE_X)
+        overlap_right = min(x2, self.RIGHT_LANE_X)
+        overlap_center = (overlap_left + overlap_right) / 2
+
+        # Determine which third based on the center of the overlapping portion
         lane_width = self.RIGHT_LANE_X - self.LEFT_LANE_X
         zone_width = lane_width / 3
-        
-        # Check if obstacle is even in the lane
-        if obstacle_center_x < self.LEFT_LANE_X:
-            return 'left_outside'
-        elif obstacle_center_x > self.RIGHT_LANE_X:
-            return 'right_outside'
-        
-        # Determine which third
-        relative_pos = obstacle_center_x - self.LEFT_LANE_X
-        
+        relative_pos = overlap_center - self.LEFT_LANE_X
+
         if relative_pos < zone_width:
             return 'left_third'
         elif relative_pos < 2 * zone_width:
@@ -149,18 +152,23 @@ class ObstacleAvoidanceSystem:
     def calculate_obstacle_coverage(self, box):
         """
         Calculate what percentage of lane width the obstacle covers.
-        
+        Only counts the portion of the box that actually overlaps the lane.
+
         Args:
             box (tuple): Bounding box (x1, y1, x2, y2)
-            
+
         Returns:
-            float: Coverage ratio (0.0 to 1.0+)
+            float: Coverage ratio (0.0 to 1.0)
         """
         x1, y1, x2, y2 = box
-        obstacle_width = x2 - x1
         lane_width = self.RIGHT_LANE_X - self.LEFT_LANE_X
-        
-        coverage = obstacle_width / lane_width
+
+        # Only measure the overlap with the lane, not the full box width
+        overlap_left = max(x1, self.LEFT_LANE_X)
+        overlap_right = min(x2, self.RIGHT_LANE_X)
+        overlap_width = max(0, overlap_right - overlap_left)
+
+        coverage = overlap_width / lane_width
         return coverage
     
     def calculate_steering_bias(self, zone):
