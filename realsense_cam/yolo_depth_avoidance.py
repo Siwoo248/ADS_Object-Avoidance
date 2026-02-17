@@ -513,13 +513,13 @@ class YOLODepthDetectorWithAvoidance:
                                     old_left = self.avoidance.LEFT_LANE_X
                                     old_right = self.avoidance.RIGHT_LANE_X
 
-                                    self.avoidance.LEFT_LANE_X = int(left_x)
-                                    self.avoidance.RIGHT_LANE_X = int(right_x)
-                                    self.avoidance.LANE_WIDTH_PIXELS = int(right_x) - int(left_x)
+                                    # self.avoidance.LEFT_LANE_X = int(left_x)
+                                    # self.avoidance.RIGHT_LANE_X = int(right_x)
+                                    # self.avoidance.LANE_WIDTH_PIXELS = int(right_x) - int(left_x)
 
-                                    if abs(old_left - left_x) > 10 or abs(old_right - right_x) > 10:
-                                        print(f"Lane updated: L={int(left_x)}px, R={int(right_x)}px "
-                                              f"(width={self.avoidance.LANE_WIDTH_PIXELS}px)")
+                                    # if abs(old_left - left_x) > 10 or abs(old_right - right_x) > 10:
+                                    #     print(f"Lane updated: L={int(left_x)}px, R={int(right_x)}px "
+                                    #           f"(width={self.avoidance.LANE_WIDTH_PIXELS}px)")
 
                         control = self.lkas.get_control(timeout=0.01)
                         if control is not None:
