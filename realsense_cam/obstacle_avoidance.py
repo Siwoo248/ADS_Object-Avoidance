@@ -49,7 +49,7 @@ class ObstacleAvoidanceSystem:
         self.LANE_CHANGE_STEERING = 0.6      # Full lane change maneuver
 
         # Throttle parameters - FIXED at 0.5
-        self.THROTTLE = 0.5  # Fixed throttle for all situations
+        self.THROTTLE = 0.3  # Fixed throttle for all situations
 
         # Vehicle speed calibration (measured experimentally)
         self.VEHICLE_SPEED = 0.25  # m/s at throttle 0.5 (adjust after testing!)
