@@ -551,6 +551,26 @@ class YOLODepthDetectorWithAvoidance:
                 # For lane-change sub-states, map to the base avoidance action
                 if action and action.startswith('LANE_CHANGE_'):
                     obstacle_action = ObstacleAction.AVOID_LEFT  # lane changes default left
+                # For micro-adjust sub-states, map to AVOID so both steering
+                # and throttle reach the vehicle via the DecisionServer.
+                elif action and action.startswith('MICRO_ADJUST_'):
+                    if avoidance_steering < 0:
+                        obstacle_action = ObstacleAction.AVOID_LEFT
+                    else:
+                        obstacle_action = ObstacleAction.AVOID_RIGHT
+
+                # Proximity slow-down: when an obstacle is within 2m and no
+                # stronger avoidance action is active, send SLOW so the
+                # DecisionServer reduces throttle (to 0.3) while LKAS keeps
+                # steering normally.
+                SLOW_DISTANCE = 2.0   # meters
+                SLOW_THROTTLE = 0.3
+                if (obstacle_action == ObstacleAction.NORMAL
+                        and nearest_distance > 0
+                        and nearest_distance < SLOW_DISTANCE):
+                    obstacle_action = ObstacleAction.SLOW
+                    throttle = SLOW_THROTTLE
+                    final_throttle = SLOW_THROTTLE
 
                 obstacle_msg = ObstacleMessage(
                     active=(obstacle_action != ObstacleAction.NORMAL),
