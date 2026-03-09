@@ -29,31 +29,31 @@ class ObstacleAvoidanceSystem:
         
         # ========== CALIBRATION PARAMETERS ==========
         # TODO: Calibrate these by driving and observing lane positions in pixels
-        self.LEFT_LANE_X = 260      # Left lane boundary (pixels)
-        self.RIGHT_LANE_X = 490     # Right lane boundary (pixels)
+        self.LEFT_LANE_X = 255      # Left lane boundary (pixels)
+        self.RIGHT_LANE_X = 485     # Right lane boundary (pixels)
         self.LANE_WIDTH_PIXELS = self.RIGHT_LANE_X - self.LEFT_LANE_X
 
         # Distance thresholds (meters)
-        self.CRITICAL_DISTANCE = 0.5    # Make decision at this distance
+        self.CRITICAL_DISTANCE = 0.7    # Make decision at this distance
 
         # Hysteresis thresholds to prevent oscillation
-        self.DECISION_ENTER = 0.5       # Trigger decision
-        self.DECISION_EXIT = 0.6        # Clear decision (must be > DECISION_ENTER)
+        self.DECISION_ENTER = 0.7       # Trigger decision
+        self.DECISION_EXIT = 0.8        # Clear decision (must be > DECISION_ENTER)
 
         # Coverage thresholds (what fraction of lane the obstacle blocks)
         self.MICRO_ADJUST_THRESHOLD = 0.33   # < 33% of lane in A or C → micro adjust
         # >= 33% OR in B zone → lane change or stop
 
         # Steering parameters
-        self.MICRO_ADJUST_STEERING = 0.15    # Small steering bias (stay in lane)
-        self.LANE_CHANGE_STEERING = 0.5      # Full lane change maneuver
+        self.MICRO_ADJUST_STEERING = 0.4    # Small steering bias (stay in lane)
+        self.LANE_CHANGE_STEERING = 0.8      # Full lane change maneuver
 
         # Throttle parameters - FIXED at 0.3
-        self.THROTTLE = 0.3  # Fixed throttle for all situations
+        self.THROTTLE = 0.2  # Fixed throttle for all situations
 
         # Vehicle speed calibration (measured experimentally)
         self.VEHICLE_SPEED = self.THROTTLE
-        self.LATERAL_SPEED = self.THROTTLE
+        self.LATERAL_SPEED = self.THROTTLE * 1.0
 
         # Lane preference for two-lane road (vehicle normally on right)
         self.PREFERRED_LANE = 'right'  # 'right' or 'left'
@@ -64,13 +64,20 @@ class ObstacleAvoidanceSystem:
         self.LANE_CHANGE_PASS_DISTANCE = 0.5  # meters to travel forward while passing
         self.LANE_CHANGE_MIN_CLEARANCE = 0.3   # minimum clearance from obstacle to attempt lane change
 
-        # Counter-steer pulse duration (seconds) — brief opposite steer to
-        # cancel turning momentum and straighten the vehicle between phases.
-        self.COUNTER_STEER_DURATION = 0.5
+        # Counter-steer pulse duration (seconds) — used for micro adjust
+        # stabilization only.
+        self.COUNTER_STEER_DURATION = 1.5
+
+        # Straight phase after micro adjust counter-steer (seconds) — lets
+        # the vehicle settle before handing back to LKAS.
+        self.MICRO_STRAIGHT_DURATION = 1.0
+
+        # Lane-change counter-steer duration (seconds) — full opposite steer applied.
+        self.LANE_COUNTER_STEER_DURATION = 2.0
 
         # Micro adjust duration (seconds) — how long to apply the small
         # steering bias before counter-steering back to straight.
-        self.MICRO_ADJUST_DURATION = 0.5
+        self.MICRO_ADJUST_DURATION = 1.0
 
         # ========== STATE VARIABLES ==========
         self.decision_made = False
@@ -82,7 +89,7 @@ class ObstacleAvoidanceSystem:
         self.obstacle_coverage = 0
 
         # Timer-based overtaking state machine
-        # States: NORMAL → MOVING_OVER → STABILIZE_1 → PASSING → RETURNING → STABILIZE_2 → NORMAL
+        # States: NORMAL → MOVING_OVER → COUNTER_1 → LKAS_ALIGN_1 → RETURNING → COUNTER_2 → LKAS_ALIGN_2 → NORMAL
         self.overtaking_state = 'NORMAL'
         self.overtaking_phase_start = 0
         self.overtaking_durations = None
@@ -91,7 +98,7 @@ class ObstacleAvoidanceSystem:
         self.can_change_lane = True  # Whether lane change is possible
 
         # Timer-based micro adjust state machine
-        # States: NORMAL → MICRO_ADJUSTING → MICRO_STABILIZE → NORMAL
+        # States: NORMAL → MICRO_ADJUSTING → MICRO_STABILIZE → MICRO_STRAIGHT → NORMAL
         self.micro_adjust_state = 'NORMAL'
         self.micro_adjust_phase_start = 0
         self.micro_adjust_steering = 0.0  # steering bias for current micro adjust
@@ -342,37 +349,27 @@ class ObstacleAvoidanceSystem:
         lateral_clearance = lane_width_meters
         phase1_duration = lateral_clearance / self.LATERAL_SPEED
 
-        # Phase 2: Pass the obstacle (go straight in new lane)
-        # FIXED distance since we can't see when we've passed
-        # This should be enough to clear a stationary obstacle
-        passing_distance = self.LANE_CHANGE_PASS_DISTANCE 
-        phase2_duration = passing_distance / self.VEHICLE_SPEED
-
         # Phase 3: Return to original lane (mirror of phase 1)
-        phase3_duration = phase1_duration
+        phase3_duration = phase1_duration + 1
 
-        # Stabilization: brief counter-steer pulse after phase 1 and phase 3
-        stabilize_duration = self.COUNTER_STEER_DURATION
+        # Counter-steer: applied after each hard-steer phase to cancel momentum
+        counter_steer_duration = self.LANE_COUNTER_STEER_DURATION
 
-        total = (phase1_duration + stabilize_duration +
-                 phase2_duration +
-                 phase3_duration + stabilize_duration)
+        total = (phase1_duration + counter_steer_duration +
+                 phase3_duration + counter_steer_duration)
 
         direction_name = "LEFT" if direction < 0 else "RIGHT"
         print(f"  Overtaking plan ({direction_name}):")
         print(f"    - Lane width: {lane_width_meters:.2f}m")
-        print(f"    - Fixed passing distance: {passing_distance:.2f}m")
         print(f"    - Phase 1 (move to {direction_name} lane): {phase1_duration:.1f}s")
-        print(f"    - Stabilize 1 (counter-steer): {stabilize_duration:.2f}s")
-        print(f"    - Phase 2 (pass straight): {phase2_duration:.1f}s")
+        print(f"    - Counter-steer 1: {counter_steer_duration:.1f}s")
         print(f"    - Phase 3 (return to original lane): {phase3_duration:.1f}s")
-        print(f"    - Stabilize 2 (counter-steer): {stabilize_duration:.2f}s")
+        print(f"    - Counter-steer 2: {counter_steer_duration:.1f}s")
         print(f"    - Total time: {total:.1f}s")
 
         return {
             'phase1': phase1_duration,
-            'stabilize': stabilize_duration,
-            'phase2': phase2_duration,
+            'counter_steer': counter_steer_duration,
             'phase3': phase3_duration,
             'total': total,
             'direction': direction
@@ -505,11 +502,12 @@ class ObstacleAvoidanceSystem:
         """
         Update timer-based micro adjust state machine.
 
-        Two phases:
-        1. MICRO_ADJUSTING:  Apply small steering bias to nudge around obstacle
-        2. MICRO_STABILIZE:  Brief counter-steer to straighten out
+        Three phases:
+        1. MICRO_ADJUSTING:   Apply small steering bias to nudge around obstacle
+        2. MICRO_STABILIZE:   Brief counter-steer to cancel momentum
+        3. MICRO_STRAIGHT:    Drive straight for 1s to settle before LKAS resumes
 
-        LKAS is DISABLED during both phases so it doesn't fight the bias.
+        LKAS is DISABLED during all phases so it doesn't fight the bias.
 
         Returns:
             tuple: (steering, throttle, state_name, enable_lkas)
@@ -531,28 +529,33 @@ class ObstacleAvoidanceSystem:
 
         elif self.micro_adjust_state == 'MICRO_STABILIZE':
             if elapsed > self.COUNTER_STEER_DURATION:
-                self.micro_adjust_state = 'NORMAL'
-                self.decision_made = False
-                print("  Micro stabilize complete -> NORMAL")
-                return 0.0, self.THROTTLE, 'NORMAL', True
+                self.micro_adjust_state = 'MICRO_STRAIGHT'
+                self.micro_adjust_phase_start = time.time()
+                print("  Micro stabilize complete -> Straight: settling before NORMAL")
+                return 0.0, self.THROTTLE, 'MICRO_STRAIGHT', False
 
             return -steer, self.THROTTLE, 'MICRO_STABILIZE', False
+
+        elif self.micro_adjust_state == 'MICRO_STRAIGHT':
+            if elapsed > self.MICRO_STRAIGHT_DURATION:
+                self.micro_adjust_state = 'NORMAL'
+                self.decision_made = False
+                print("  Micro straight complete -> NORMAL")
+                return 0.0, self.THROTTLE, 'NORMAL', True
+
+            return 0.0, self.THROTTLE, 'MICRO_STRAIGHT', False
 
         return 0.0, self.THROTTLE, 'NORMAL', True
 
     def update_overtaking_state(self):
         """
         Update timer-based overtaking state machine.
-        Returns updated steering and throttle based on current phase.
 
-        Five phases:
-        1. MOVING_OVER:  Steer into adjacent lane
-        2. STABILIZE_1:  Brief counter-steer to cancel turning momentum
-        3. PASSING:      Go straight in new lane
-        4. RETURNING:    Steer back to original lane
-        5. STABILIZE_2:  Brief counter-steer to straighten out
-
-        LKAS is DISABLED during steering phases, ENABLED during PASSING.
+        Four phases:
+        1. MOVING_OVER:  Hard steer into adjacent lane
+        2. COUNTER_1:    Opposite steer to cancel momentum
+        3. RETURNING:    Hard steer back to original lane
+        4. COUNTER_2:    Opposite steer to cancel momentum, then NORMAL/LKAS resumes
 
         Returns:
             tuple: (steering, throttle, state_name, enable_lkas)
@@ -563,54 +566,48 @@ class ObstacleAvoidanceSystem:
         elapsed = time.time() - self.overtaking_phase_start
         direction = self.overtaking_durations.get('direction', self.lane_change_direction)
 
-        # Steering values for each direction
+        # Steering values
         move_steer = -self.LANE_CHANGE_STEERING if direction < 0 else self.LANE_CHANGE_STEERING
-        return_steer = -move_steer  # opposite
+        return_steer = -move_steer
+        # Counter-steer: full opposite steer regardless of hard-steer magnitude
+        counter1_steer = -1.0 if move_steer > 0 else 1.0
+        counter2_steer = -1.0 if return_steer > 0 else 1.0
 
         if self.overtaking_state == 'MOVING_OVER':
             if elapsed > self.overtaking_durations['phase1']:
-                self.overtaking_state = 'STABILIZE_1'
+                self.overtaking_state = 'COUNTER_1'
                 self.overtaking_phase_start = time.time()
-                print("  Phase 1 complete -> Stabilize 1: counter-steer")
-                return return_steer, self.THROTTLE, 'STABILIZE_1', False
+                print("  Phase 1 complete -> Counter-steer 1: cancelling momentum")
+                return counter1_steer, self.THROTTLE, 'COUNTER_1', False
 
             return move_steer, self.THROTTLE, 'MOVING_OVER', False
 
-        elif self.overtaking_state == 'STABILIZE_1':
-            if elapsed > self.overtaking_durations['stabilize']:
-                self.overtaking_state = 'PASSING'
-                self.overtaking_phase_start = time.time()
-                print("  Stabilize 1 complete -> Phase 2: Passing in new lane")
-                return 0.0, self.THROTTLE, 'PASSING', True
-
-            return return_steer, self.THROTTLE, 'STABILIZE_1', False
-
-        elif self.overtaking_state == 'PASSING':
-            if elapsed > self.overtaking_durations['phase2']:
+        elif self.overtaking_state == 'COUNTER_1':
+            if elapsed > self.overtaking_durations['counter_steer']:
                 self.overtaking_state = 'RETURNING'
                 self.overtaking_phase_start = time.time()
-                print("  Phase 2 complete -> Phase 3: Returning to original lane")
+                print("  Counter-steer 1 complete -> Returning to original lane")
                 return return_steer, self.THROTTLE, 'RETURNING', False
 
-            return 0.0, self.THROTTLE, 'PASSING', True
+            return counter1_steer, self.THROTTLE, 'COUNTER_1', False
 
         elif self.overtaking_state == 'RETURNING':
             if elapsed > self.overtaking_durations['phase3']:
-                self.overtaking_state = 'STABILIZE_2'
+                self.overtaking_state = 'COUNTER_2'
                 self.overtaking_phase_start = time.time()
-                print("  Phase 3 complete -> Stabilize 2: counter-steer")
-                return move_steer, self.THROTTLE, 'STABILIZE_2', False
+                print("  Phase 3 complete -> Counter-steer 2: cancelling momentum")
+                return counter2_steer, self.THROTTLE, 'COUNTER_2', False
 
             return return_steer, self.THROTTLE, 'RETURNING', False
 
-        elif self.overtaking_state == 'STABILIZE_2':
-            if elapsed > self.overtaking_durations['stabilize']:
+        elif self.overtaking_state == 'COUNTER_2':
+            if elapsed > self.overtaking_durations['counter_steer']:
                 self.overtaking_state = 'NORMAL'
                 self.decision_made = False
-                print("  Stabilize 2 complete -> Back in original lane!")
+                print("  Counter-steer 2 complete -> NORMAL: back in original lane!")
                 return 0.0, self.THROTTLE, 'NORMAL', True
 
-            return move_steer, self.THROTTLE, 'STABILIZE_2', False
+            return counter2_steer, self.THROTTLE, 'COUNTER_2', False
 
         return 0.0, self.THROTTLE, 'NORMAL', True
     
@@ -632,7 +629,9 @@ class ObstacleAvoidanceSystem:
         # If currently in micro adjust maneuver, continue with timer-based control
         if self.micro_adjust_state != 'NORMAL':
             steering, throttle, state, enable_lkas = self.update_micro_adjust_state()
-            self.current_action = f'MICRO_ADJUST_{state}'
+            # When state machine returns 'NORMAL', use 'NORMAL' directly so that
+            # yolo_depth_avoidance.py does NOT re-map it to an AVOID override.
+            self.current_action = 'NORMAL' if state == 'NORMAL' else f'MICRO_ADJUST_{state}'
             self.current_steering = steering
             self.current_throttle = throttle
             return self.current_action, steering, throttle, enable_lkas
@@ -640,7 +639,9 @@ class ObstacleAvoidanceSystem:
         # If currently in overtaking maneuver, continue with timer-based control
         if self.overtaking_state != 'NORMAL':
             steering, throttle, state, enable_lkas = self.update_overtaking_state()
-            self.current_action = f'LANE_CHANGE_{state}'
+            # Same fix: 'LANE_CHANGE_NORMAL' would match startswith('LANE_CHANGE_')
+            # in yolo_depth_avoidance.py and wrongly send AVOID with steering=0.
+            self.current_action = 'NORMAL' if state == 'NORMAL' else f'LANE_CHANGE_{state}'
             self.current_steering = steering
             self.current_throttle = throttle
             return self.current_action, steering, throttle, enable_lkas
@@ -810,12 +811,12 @@ class ObstacleAvoidanceSystem:
             'MICRO_ADJUST': (255, 255, 0), # Cyan - stay in lane
             'MICRO_ADJUST_MICRO_ADJUSTING': (255, 255, 0), # Cyan
             'MICRO_ADJUST_MICRO_STABILIZE': (0, 128, 255), # Orange-red - counter-steer
+            'MICRO_ADJUST_MICRO_STRAIGHT': (0, 200, 100),  # Teal - settling straight
             'LANE_CHANGE': (0, 0, 255),    # Red - full lane change
-            'LANE_CHANGE_MOVING_OVER': (0, 0, 255),  # Red
-            'LANE_CHANGE_STABILIZE_1': (0, 128, 255), # Orange-red - counter-steer
-            'LANE_CHANGE_PASSING': (0, 165, 255),     # Orange - LKAS active in new lane
-            'LANE_CHANGE_RETURNING': (0, 0, 255),    # Red
-            'LANE_CHANGE_STABILIZE_2': (0, 128, 255), # Orange-red - counter-steer
+            'LANE_CHANGE_MOVING_OVER': (0, 0, 255),    # Red
+            'LANE_CHANGE_COUNTER_1': (0, 128, 255),    # Orange-red - counter-steer
+            'LANE_CHANGE_RETURNING': (0, 0, 255),      # Red
+            'LANE_CHANGE_COUNTER_2': (0, 128, 255),    # Orange-red - counter-steer
             'STOP': (0, 0, 255),           # Red - emergency stop
             'IGNORE': (128, 128, 128)      # Gray
         }
@@ -831,10 +832,13 @@ class ObstacleAvoidanceSystem:
         if self.overtaking_state != 'NORMAL':
             elapsed = time.time() - self.overtaking_phase_start
             if self.overtaking_durations:
-                current_phase = self.overtaking_durations.get(
-                    'phase1' if self.overtaking_state == 'MOVING_OVER' else
-                    'phase2' if self.overtaking_state == 'PASSING' else 'phase3'
-                )
+                phase_key = {
+                    'MOVING_OVER': 'phase1',
+                    'COUNTER_1': 'counter_steer',
+                    'RETURNING': 'phase3',
+                    'COUNTER_2': 'counter_steer',
+                }.get(self.overtaking_state, 'phase1')
+                current_phase = self.overtaking_durations.get(phase_key, 0)
                 cv2.putText(panel, f"Timer: {elapsed:.1f}s / {current_phase:.1f}s",
                            (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
         

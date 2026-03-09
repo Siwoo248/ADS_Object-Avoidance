@@ -48,10 +48,12 @@ YOLO_PARAMS = {
 class YOLOWebSocketServer:
     """Async WebSocket server for frame streaming and parameter control."""
 
-    def __init__(self, port: int, on_parameter: Callable, on_action: Callable):
+    def __init__(self, port: int, on_parameter: Callable, on_action: Callable,
+                 on_manual_control: Callable):
         self.port = port
         self._on_parameter = on_parameter
         self._on_action = on_action
+        self._on_manual_control = on_manual_control
 
         self.clients: Set = set()
         self._lock = Lock()
@@ -181,6 +183,12 @@ class YOLOWebSocketServer:
 
                     elif msg_type == 'action':
                         self._on_action(data.get('action'))
+
+                    elif msg_type == 'manual_control':
+                        self._on_manual_control(
+                            data.get('steering', 0.0),
+                            data.get('throttle', 0.0),
+                        )
 
                 except json.JSONDecodeError:
                     pass
@@ -350,10 +358,16 @@ class YOLOWebViewer:
         self._last_status_time = 0
         self._status_interval = 1.0  # 1 Hz status updates
 
+        # Manual control state
+        self.manual_mode = False
+        self.manual_steering = 0.0
+        self.manual_throttle = 0.0
+
         self.ws_server = YOLOWebSocketServer(
             port=self.ws_port,
             on_parameter=self._handle_parameter,
             on_action=self._handle_action,
+            on_manual_control=self._handle_manual_control,
         )
         self.http_server = YOLOHTTPServer(
             port=self.http_port,
@@ -434,8 +448,26 @@ class YOLOWebViewer:
         if action == 'reset' and self.avoidance is not None:
             self.avoidance.reset()
             print("[YOLO Viewer] Avoidance system reset")
+        elif action == 'toggle_manual':
+            self.manual_mode = not self.manual_mode
+            if not self.manual_mode:
+                # Returning to avoidance: clear inputs and reset state machine
+                self.manual_steering = 0.0
+                self.manual_throttle = 0.0
+                if self.avoidance is not None:
+                    self.avoidance.reset()
+                    # Clear any stale STOP obstacle message left by manual mode
+                    self.avoidance.clear_obstacle_override()
+            mode_str = 'MANUAL' if self.manual_mode else 'AVOIDANCE'
+            print(f"[YOLO Viewer] Control mode: {mode_str}")
         else:
             print(f"[YOLO Viewer] Unknown action: {action}")
+
+    def _handle_manual_control(self, steering: float, throttle: float):
+        """Update manual steering/throttle (only applied when manual_mode is True)."""
+        if self.manual_mode:
+            self.manual_steering = max(-1.0, min(1.0, float(steering)))
+            self.manual_throttle = max(-1.0, min(1.0, float(throttle)))
 
     def _get_config(self) -> dict:
         """Return current parameter values for HTML template and /config endpoint."""

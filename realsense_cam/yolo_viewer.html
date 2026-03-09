@@ -77,6 +77,27 @@
         .btn:hover { background: #222; border-color: #3a3a3a; color: #fff; }
         .btn.warning { border-color: #553; color: #cc9; }
         .btn.warning:hover { background: #332; border-color: #774; }
+        .btn.manual-off { border-color: #1a3a1a; color: #4a8a4a; }
+        .btn.manual-off:hover { background: #0f2a0f; border-color: #2a5a2a; }
+        .btn.manual-on {
+            border-color: #0af; color: #0af;
+            background: #001a2a; box-shadow: 0 0 6px rgba(0,170,255,0.4);
+        }
+        .btn.manual-on:hover { background: #002a3a; }
+
+        /* Manual mode overlay on video */
+        .manual-banner {
+            display: none;
+            position: absolute; bottom: 0; left: 0; right: 0;
+            padding: 6px 12px;
+            background: rgba(0,170,255,0.15);
+            border-top: 2px solid #0af;
+            color: #0af; font-size: 11px; font-weight: 600;
+            letter-spacing: 1px; text-transform: uppercase;
+            text-align: center;
+        }
+        .manual-banner.active { display: block; }
+        .value.manual { color: #0af; }
 
         /* Sliders */
         .param-section {
@@ -148,23 +169,35 @@
 
     <div class="controls">
         <button class="btn warning" onclick="sendAction('reset')">Reset Avoidance</button>
+        <button class="btn manual-off" id="manualBtn" onclick="sendAction('toggle_manual')">Manual [OFF]</button>
+        <span style="color:#555;font-size:11px;align-self:center;margin-left:4px">M key • ↑↓ throttle • ←→ steer</span>
     </div>
 
     <div class="main">
         <div class="video-container">
             <canvas id="canvas"></canvas>
             <div class="no-signal" id="noSignal">No Signal</div>
+            <div class="manual-banner" id="manualBanner">
+                MANUAL MODE &nbsp;|&nbsp; ↑↓ throttle &nbsp; ←→ steer &nbsp;|&nbsp; M to exit
+            </div>
         </div>
         <div class="sidebar">
             <div class="conn-status disconnected" id="connStatus">Disconnected</div>
 
             <!-- Status -->
             <div class="section-title">Status</div>
+            <div class="hud-item"><span class="label">Mode</span><span class="value" id="ctrl-mode">AVOIDANCE</span></div>
             <div class="hud-item"><span class="label">FPS</span><span class="value" id="fps">--</span></div>
             <div class="hud-item"><span class="label">Action</span><span class="value" id="action">--</span></div>
             <div class="hud-item"><span class="label">Overtaking</span><span class="value" id="overtaking">--</span></div>
             <div class="hud-item"><span class="label">Steering</span><span class="value" id="steering">--</span></div>
             <div class="hud-item"><span class="label">Throttle</span><span class="value" id="throttle">--</span></div>
+            <div class="hud-item" id="manual-row" style="display:none">
+                <span class="label">Manual Steer</span><span class="value manual" id="manual-steer">0.00</span>
+            </div>
+            <div class="hud-item" id="manual-thr-row" style="display:none">
+                <span class="label">Manual Throttle</span><span class="value manual" id="manual-thr">0.00</span>
+            </div>
             <div class="hud-item"><span class="label">Nearest</span><span class="value" id="nearest">--</span></div>
             <div class="hud-item"><span class="label">LKAS</span><span class="value" id="lkas">--</span></div>
             <div class="hud-item"><span class="label">Lane</span><span class="value" id="lane">--</span></div>
@@ -331,6 +364,74 @@
         let frameReceived = false;
         let reconnectTimer = null;
 
+        // Manual control state
+        const MANUAL_STEER = 0.6;
+        const MANUAL_THROTTLE = 0.3;
+        let manualMode = false;
+        let manualSteering = 0.0;
+        let manualThrottle = 0.0;
+
+        function sendManualControl() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    type: 'manual_control',
+                    steering: manualSteering,
+                    throttle: manualThrottle,
+                }));
+            }
+            document.getElementById('manual-steer').textContent =
+                (manualSteering >= 0 ? '+' : '') + manualSteering.toFixed(2);
+            document.getElementById('manual-thr').textContent =
+                manualThrottle.toFixed(2);
+        }
+
+        function setManualUI(active) {
+            const btn = document.getElementById('manualBtn');
+            const banner = document.getElementById('manualBanner');
+            const modeEl = document.getElementById('ctrl-mode');
+            const mRow = document.getElementById('manual-row');
+            const tRow = document.getElementById('manual-thr-row');
+            if (active) {
+                btn.textContent = 'Manual [ON]';
+                btn.className = 'btn manual-on';
+                banner.classList.add('active');
+                modeEl.textContent = 'MANUAL';
+                modeEl.className = 'value manual';
+                mRow.style.display = '';
+                tRow.style.display = '';
+            } else {
+                btn.textContent = 'Manual [OFF]';
+                btn.className = 'btn manual-off';
+                banner.classList.remove('active');
+                modeEl.textContent = 'AVOIDANCE';
+                modeEl.className = 'value action-normal';
+                mRow.style.display = 'none';
+                tRow.style.display = 'none';
+            }
+        }
+
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'm' || e.key === 'M') {
+                sendAction('toggle_manual');
+                return;
+            }
+            if (!manualMode) return;
+            let changed = false;
+            if      (e.key === 'ArrowUp')    { manualThrottle =  MANUAL_THROTTLE; changed = true; }
+            else if (e.key === 'ArrowDown')  { manualThrottle = -MANUAL_THROTTLE; changed = true; }
+            else if (e.key === 'ArrowLeft')  { manualSteering = -MANUAL_STEER;    changed = true; }
+            else if (e.key === 'ArrowRight') { manualSteering =  MANUAL_STEER;    changed = true; }
+            if (changed) { e.preventDefault(); sendManualControl(); }
+        });
+
+        document.addEventListener('keyup', function(e) {
+            if (!manualMode) return;
+            let changed = false;
+            if      (e.key === 'ArrowUp'   || e.key === 'ArrowDown')  { manualThrottle = 0; changed = true; }
+            else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') { manualSteering = 0; changed = true; }
+            if (changed) sendManualControl();
+        });
+
         // Set preferred lane select to current value
         const prefSelect = document.getElementById('PREFERRED_LANE');
         if (prefSelect) prefSelect.value = '{{PREFERRED_LANE}}';
@@ -402,6 +503,19 @@
         }
 
         function updateStatus(data) {
+            // Sync manual mode UI from server state
+            if (data.manual_mode !== undefined && data.manual_mode !== manualMode) {
+                manualMode = data.manual_mode;
+                setManualUI(manualMode);
+                if (!manualMode) { manualSteering = 0; manualThrottle = 0; }
+            }
+            if (data.manual_mode && data.manual_steering !== undefined) {
+                document.getElementById('manual-steer').textContent =
+                    (data.manual_steering >= 0 ? '+' : '') + data.manual_steering.toFixed(2);
+                document.getElementById('manual-thr').textContent =
+                    data.manual_throttle != null ? data.manual_throttle.toFixed(2) : '0.00';
+            }
+
             setText('fps', data.fps != null ? data.fps.toFixed(1) : '--');
 
             const actionEl = document.getElementById('action');
@@ -458,7 +572,14 @@
         function sendAction(action) {
             if (ws && ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({ type: 'action', action: action }));
-                showNotification(action.toUpperCase());
+                if (action === 'toggle_manual') {
+                    manualMode = !manualMode;
+                    if (!manualMode) { manualSteering = 0; manualThrottle = 0; sendManualControl(); }
+                    setManualUI(manualMode);
+                    showNotification(manualMode ? 'MANUAL MODE ON' : 'AVOIDANCE MODE');
+                } else {
+                    showNotification(action.toUpperCase());
+                }
             }
         }
 

@@ -28,7 +28,7 @@ CLASS_NAMES = [
 ]
 
 # Inference settings
-CONFIDENCE_THRESHOLD = 0.20  # Confidence threshold for detections
+CONFIDENCE_THRESHOLD = 0.60  # Confidence threshold for detections
 IOU_THRESHOLD = 0.45  # IOU threshold for NMS
 IMAGE_SIZE = 640  # YOLOv8 input image size
 

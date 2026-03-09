@@ -399,6 +399,25 @@ class YOLODepthDetectorWithAvoidance:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
         return frame
 
+    def clear_obstacle_override(self):
+        """Write a SLOW message to clear any stale manual/STOP override.
+
+        Uses the avoidance base throttle so the vehicle can restart from rest.
+        SLOW overrides only throttle (keeps LKAS steering), so the car moves
+        forward at avoidance speed while lane-keeping resumes normally.
+        The avoidance loop will overwrite this within one YOLO frame (~100-300ms).
+        """
+        self.control_channel.write_obstacle(ObstacleMessage(
+            active=True,
+            action=ObstacleAction.SLOW,
+            distance=-1.0,
+            steering=0.0,
+            throttle=self.avoidance.THROTTLE,
+            brake=0.0,
+            timestamp=time.time(),
+            frame_id=0,
+        ))
+
     def run(self):
         """Run real-time detection with depth measurement and obstacle avoidance."""
         print("Starting real-time detection with obstacle avoidance...")
@@ -523,77 +542,112 @@ class YOLODepthDetectorWithAvoidance:
 
                         control = self.lkas.get_control(timeout=0.01)
                         if control is not None:
-                            lkas_steering = control.steering
+                            # lkas_steering = control.steering
                     except Exception as e:
                         print(f"LKAS error: {e}")
 
                 self.lkas_steering = lkas_steering
                 self.lkas_lane_detected = lane_detected
 
-                # Process obstacles with avoidance system
-                action, avoidance_steering, throttle, enable_lkas_flag = \
-                    self.avoidance.process_obstacles(all_detections, all_distances, all_boxes)
+                # Manual control mode: bypass avoidance, use web viewer inputs
+                if self.web_viewer and self.web_viewer.manual_mode:
+                    action = 'MANUAL'
+                    # final_steering = self.web_viewer.manual_steering
+                    final_throttle = self.web_viewer.manual_throttle
+                    # avoidance_steering = final_steering
+                    throttle = final_throttle
+                    enable_lkas_flag = False
+                    # Write active obstacle so DecisionServer uses manual steering/throttle.
+                    # When no keys are held (both 0), write inactive so the vehicle stops.
+                    if final_steering != 0.0 or final_throttle != 0.0:
+                        manual_obs_action = (ObstacleAction.AVOID_LEFT if final_steering <= 0
+                                             else ObstacleAction.AVOID_RIGHT)
+                        self.control_channel.write_obstacle(ObstacleMessage(
+                            active=True,
+                            action=manual_obs_action,
+                            distance=nearest_distance,
+                            steering=final_steering,
+                            throttle=final_throttle,
+                            brake=0.0,
+                            timestamp=time.time(),
+                            frame_id=msg.frame_id,
+                        ))
+                    else:
+                        # No input: send STOP so DecisionServer holds still
+                        # and LKAS cannot take over while in manual mode.
+                        self.control_channel.write_obstacle(ObstacleMessage(
+                            active=True,
+                            action=ObstacleAction.STOP,
+                            distance=nearest_distance,
+                            steering=0.0,
+                            throttle=0.0,
+                            brake=1.0,
+                            timestamp=time.time(),
+                            frame_id=msg.frame_id,
+                        ))
 
-                # Combine LKAS steering with obstacle avoidance steering
-                if self.enable_lkas and lane_detected and enable_lkas_flag:
-                    if action in ('NORMAL', 'MONITOR', 'IGNORE', None):
-                        final_steering = lkas_steering
+                else:
+                    # Process obstacles with avoidance system
+                    action, avoidance_steering, throttle, enable_lkas_flag = \
+                        self.avoidance.process_obstacles(all_detections, all_distances, all_boxes)
+
+                    # Combine LKAS steering with obstacle avoidance steering
+                    if self.enable_lkas and lane_detected and enable_lkas_flag:
+                        if action in ('NORMAL', 'MONITOR', 'IGNORE', None):
+                            final_steering = lkas_steering
+                        else:
+                            final_steering = avoidance_steering
                     else:
                         final_steering = avoidance_steering
-                else:
-                    final_steering = avoidance_steering
 
-                final_throttle = throttle
+                    final_throttle = throttle
 
-                # Write obstacle avoidance status to control shared memory
-                # This is read by the decision server to integrate into LKAS control
-                obstacle_action = _ACTION_MAP.get(action, ObstacleAction.NORMAL)
-                # Hard-steer lane-change phases: send AVOID so the DecisionServer
-                # applies both steering and throttle from the obstacle message.
-                if action and action.startswith('LANE_CHANGE_'):
-                    obstacle_action = ObstacleAction.AVOID_LEFT  # lane changes default left
-                # For micro-adjust sub-states, map to AVOID so both steering
-                # and throttle reach the vehicle via the DecisionServer.
-                elif action and action.startswith('MICRO_ADJUST_'):
-                    if avoidance_steering < 0:
+                    # Write obstacle avoidance status to control shared memory
+                    obstacle_action = _ACTION_MAP.get(action, ObstacleAction.NORMAL)
+                    if action and action.startswith('LANE_CHANGE_'):
                         obstacle_action = ObstacleAction.AVOID_LEFT
-                    else:
-                        obstacle_action = ObstacleAction.AVOID_RIGHT
+                    elif action and action.startswith('MICRO_ADJUST_'):
+                        if avoidance_steering < 0:
+                            obstacle_action = ObstacleAction.AVOID_LEFT
+                        else:
+                            obstacle_action = ObstacleAction.AVOID_RIGHT
 
-                # Proximity slow-down: when an obstacle is within 2m and no
-                # stronger avoidance action is active, send SLOW so the
-                # DecisionServer reduces throttle (to 0.3) while LKAS keeps
-                # steering normally.
-                SLOW_DISTANCE = 2.0   # meters
-                SLOW_THROTTLE = 0.3
-                if (obstacle_action == ObstacleAction.NORMAL
-                        and nearest_distance > 0
-                        and nearest_distance < SLOW_DISTANCE):
-                    obstacle_action = ObstacleAction.SLOW
-                    throttle = SLOW_THROTTLE
-                    final_throttle = SLOW_THROTTLE
+                    SLOW_DISTANCE = 2.0
+                    SLOW_THROTTLE = 0.3
+                    if (obstacle_action == ObstacleAction.NORMAL
+                            and nearest_distance > 0
+                            and nearest_distance < SLOW_DISTANCE):
+                        obstacle_action = ObstacleAction.SLOW
+                        throttle = SLOW_THROTTLE
+                        final_throttle = SLOW_THROTTLE
 
-                obstacle_msg = ObstacleMessage(
-                    active=(obstacle_action != ObstacleAction.NORMAL),
-                    action=obstacle_action,
-                    distance=nearest_distance,
-                    steering=avoidance_steering,
-                    throttle=throttle,
-                    brake=1.0 if action == 'STOP' else 0.0,
-                    timestamp=time.time(),
-                    frame_id=msg.frame_id,
-                )
-                self.control_channel.write_obstacle(obstacle_msg)
+                    obstacle_msg = ObstacleMessage(
+                        active=(obstacle_action != ObstacleAction.NORMAL),
+                        action=obstacle_action,
+                        distance=nearest_distance,
+                        steering=avoidance_steering,
+                        throttle=throttle,
+                        brake=1.0 if action == 'STOP' else 0.0,
+                        timestamp=time.time(),
+                        frame_id=msg.frame_id,
+                    )
+                    self.control_channel.write_obstacle(obstacle_msg)
 
                 # Apply steering and throttle to JetRacer motors (direct control)
-                if self.enable_motor_control and self.car is not None:
-                    self.car.steering = final_steering
-                    self.car.throttle = -final_throttle
+                # if self.enable_motor_control and self.car is not None:
+                #     self.car.steering = final_steering
+                #     self.car.throttle = -final_throttle
 
-                    if abs(final_steering) > 0.01 or abs(final_throttle) > 0.01:
-                        mode = "LKAS+AVOID" if (self.enable_lkas and lane_detected) else "AVOID"
-                        print(f"[{mode}] steering={final_steering:+.2f}, "
-                              f"throttle={-final_throttle:.2f} | action={action}")
+                #     if abs(final_steering) > 0.01 or abs(final_throttle) > 0.01:
+                #         mode = "LKAS+AVOID" if (self.enable_lkas and lane_detected) else "AVOID"
+                #         print(f"[{mode}] steering={final_steering:+.2f}, "
+                #               f"throttle={-final_throttle:.2f} | action={action}")
+
+                # Draw manual mode overlay
+                if self.web_viewer and self.web_viewer.manual_mode:
+                    cv2.putText(annotated_frame, "MANUAL MODE",
+                                (10, self.frame_height - 10),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 2)
 
                 # Draw lane overlay
                 annotated_frame = self.avoidance.draw_lane_overlay(annotated_frame)
@@ -631,6 +685,9 @@ class YOLODepthDetectorWithAvoidance:
                         'lkas_steering': lkas_steering,
                         'left_lane_x': self.avoidance.LEFT_LANE_X,
                         'right_lane_x': self.avoidance.RIGHT_LANE_X,
+                        'manual_mode': self.web_viewer.manual_mode,
+                        'manual_steering': self.web_viewer.manual_steering,
+                        'manual_throttle': self.web_viewer.manual_throttle,
                     })
 
                 # Display frame (can be disabled with --no-display for headless mode)
