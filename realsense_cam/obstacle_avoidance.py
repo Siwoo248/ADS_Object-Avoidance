@@ -53,7 +53,7 @@ class ObstacleAvoidanceSystem:
 
         # Vehicle speed calibration (measured experimentally)
         self.VEHICLE_SPEED = self.THROTTLE
-        self.LATERAL_SPEED = self.THROTTLE * 1.0
+        self.LATERAL_SPEED = self.THROTTLE * 1.2
 
         # Lane preference for two-lane road (vehicle normally on right)
         self.PREFERRED_LANE = 'right'  # 'right' or 'left'
@@ -66,14 +66,14 @@ class ObstacleAvoidanceSystem:
 
         # Counter-steer pulse duration (seconds) — used for micro adjust
         # stabilization only.
-        self.COUNTER_STEER_DURATION = 1.5
+        self.COUNTER_STEER_DURATION = 2.0
 
         # Straight phase after micro adjust counter-steer (seconds) — lets
         # the vehicle settle before handing back to LKAS.
-        self.MICRO_STRAIGHT_DURATION = 1.0
+        self.MICRO_STRAIGHT_DURATION = 0.0
 
         # Lane-change counter-steer duration (seconds) — full opposite steer applied.
-        self.LANE_COUNTER_STEER_DURATION = 2.0
+        self.LANE_COUNTER_STEER_DURATION = 2.5
 
         # Micro adjust duration (seconds) — how long to apply the small
         # steering bias before counter-steering back to straight.
