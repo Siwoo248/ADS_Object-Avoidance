@@ -415,6 +415,11 @@
                 sendAction('toggle_manual');
                 return;
             }
+            if (e.key === ' ') {
+                sendAction('release_mode');
+                e.preventDefault();
+                return;
+            }
             if (!manualMode) return;
             let changed = false;
             if      (e.key === 'ArrowUp')    { manualThrottle =  MANUAL_THROTTLE; changed = true; }

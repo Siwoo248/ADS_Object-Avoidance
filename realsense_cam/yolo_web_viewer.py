@@ -362,6 +362,7 @@ class YOLOWebViewer:
         self.manual_mode = False
         self.manual_steering = 0.0
         self.manual_throttle = 0.0
+        self.release_mode_pending = False
 
         self.ws_server = YOLOWebSocketServer(
             port=self.ws_port,
@@ -443,6 +444,12 @@ class YOLOWebViewer:
         else:
             print(f"[YOLO Viewer] Unknown parameter: {name}")
 
+    def consume_release_mode(self) -> bool:
+        """Return True once if a release_mode action was received, then False."""
+        val = self.release_mode_pending
+        self.release_mode_pending = False
+        return val
+
     def _handle_action(self, action: str):
         """Handle action commands from the web viewer."""
         if action == 'reset' and self.avoidance is not None:
@@ -460,6 +467,8 @@ class YOLOWebViewer:
                     self.avoidance.clear_obstacle_override()
             mode_str = 'MANUAL' if self.manual_mode else 'AVOIDANCE'
             print(f"[YOLO Viewer] Control mode: {mode_str}")
+        elif action == 'release_mode':
+            self.release_mode_pending = True
         else:
             print(f"[YOLO Viewer] Unknown action: {action}")
 
