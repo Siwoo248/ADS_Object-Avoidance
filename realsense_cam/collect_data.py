@@ -13,11 +13,11 @@ Run alongside:
     avoid loading two YOLO models on the same GPU simultaneously.
   - vehicle.py must be STOPPED — this script controls JetRacer directly
 
-Controls:
-  ← / →   steer left / right  (accumulates ±STEER_STEP per frame, resets on release)
-  ↓        throttle = 0  (full stop)
-  space    release locked mode back to NORMAL
-  q        quit and save
+Controls (web viewer browser):
+  ← / →   steer left / right  (fixed ±STEER_VALUE, resets on release)
+  ↓        throttle = 0  (full stop, resets on release)
+  space    release MICRO_ADJUST / LANE_CHANGE back to NORMAL (not STOP)
+  Ctrl+C   quit and save
 
 Data layout (relative to this script):
   data/
@@ -35,10 +35,6 @@ import time
 import signal
 import csv
 import argparse
-import threading
-import tty
-import termios
-import select
 import importlib.util
 import numpy as np
 import cv2
@@ -106,8 +102,8 @@ YOLO_DEVICE          = 0 if torch.cuda.is_available() else 'cpu'
 # Configuration
 # ─────────────────────────────────────────────────────────────────────────────
 BASE_THROTTLE     = 0.20   # Normal driving throttle (auto-forward, human steers only)
-OBSTACLE_THROTTLE = 0.10   # Reduced throttle when an obstacle is active
-STEER_STEP        = 0.10   # Steering accumulated per frame while key held
+OBSTACLE_THROTTLE = 0.20   # Reduced throttle when an obstacle is active
+STEER_VALUE       = 0.9   # Fixed steering value applied while key held
 SAVE_FPS          = 10     # Maximum frames written per second
 YOLO_SKIP         = 2      # Run YOLO inference every N frames (memory pressure)
 MODE_CONFIRM_FRAMES = 3    # Consecutive frames a candidate mode must hold before locking
@@ -250,98 +246,6 @@ def _decide_mode(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Terminal keyboard reader  (works over SSH / headless, no X11 required)
-# ─────────────────────────────────────────────────────────────────────────────
-_ESC_MAP = {
-    '\x1b[D': 'left',
-    '\x1b[C': 'right',
-    '\x1b[B': 'down',
-    '\x1b[A': 'up',
-}
-_KEY_HOLD_TIMEOUT = 0.20  # seconds
-
-
-class TerminalKeyboard:
-    """
-    Non-blocking keyboard reader using terminal raw mode.
-
-    Runs a background thread that reads escape sequences from stdin and
-    records the last-seen timestamp for each key.  The main thread calls
-    `snapshot()` to get the current held-key state.
-
-    Arrow keys generate auto-repeat escape sequences while held (at the
-    terminal's key-repeat rate, typically ≥20 Hz).  A key is considered
-    "held" if its last sequence arrived within _KEY_HOLD_TIMEOUT seconds.
-    """
-
-    def __init__(self):
-        self._lock = threading.Lock()
-        self._last_seen: dict[str, float] = {}
-        self.quit = False
-        self._space_pending = False   # consumed on first snapshot() read
-        self._running = False
-        self._thread: threading.Thread | None = None
-        self._fd = sys.stdin.fileno()
-        self._old_settings = termios.tcgetattr(self._fd)
-
-    def start(self):
-        self._running = True
-        self._thread = threading.Thread(target=self._reader, daemon=True, name="kbd-reader")
-        self._thread.start()
-
-    def stop(self):
-        self._running = False
-        try:
-            termios.tcsetattr(self._fd, termios.TCSADRAIN, self._old_settings)
-        except Exception:
-            pass
-        if self._thread:
-            self._thread.join(timeout=1.0)
-
-    def _reader(self):
-        try:
-            tty.setraw(self._fd)
-            while self._running:
-                if not select.select([sys.stdin], [], [], 0.05)[0]:
-                    continue
-                ch = sys.stdin.read(1)
-                if ch == '\x1b':
-                    seq = ch
-                    for _ in range(2):
-                        if select.select([sys.stdin], [], [], 0.02)[0]:
-                            seq += sys.stdin.read(1)
-                        else:
-                            break
-                    key_name = _ESC_MAP.get(seq)
-                    if key_name:
-                        with self._lock:
-                            self._last_seen[key_name] = time.monotonic()
-                elif ch == ' ':
-                    with self._lock:
-                        self._space_pending = True
-                elif ch in ('q', 'Q'):
-                    with self._lock:
-                        self.quit = True
-                    break
-        finally:
-            try:
-                termios.tcsetattr(self._fd, termios.TCSADRAIN, self._old_settings)
-            except Exception:
-                pass
-
-    def snapshot(self) -> tuple[bool, bool, bool, bool, bool]:
-        """Returns (left_held, right_held, down_held, space_pressed, quit_requested).
-        space_pressed is True only once per press — consumed on read."""
-        now = time.monotonic()
-        with self._lock:
-            def held(name: str) -> bool:
-                return (now - self._last_seen.get(name, 0.0)) < _KEY_HOLD_TIMEOUT
-            space = self._space_pending
-            self._space_pending = False   # consume
-            return held('left'), held('right'), held('down'), space, self.quit
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Dataset helpers
 # ─────────────────────────────────────────────────────────────────────────────
 _CSV_HEADER = ["frame_id", "input_steering", "input_throttle", "mode"]
@@ -467,7 +371,7 @@ def main(web_port: int = 8082):
     print(f"  Obstacle throttle : {OBSTACLE_THROTTLE}")
     print(f"  Web viewer    : {'port ' + str(web_port) if web_port > 0 else 'DISABLED'}")
     print()
-    print("  Controls: ← steer left  → steer right  ↓ stop  q quit")
+    print("  Controls: ← steer left  → steer right  ↓ stop  Ctrl+C quit  (web viewer)")
     print("=" * 60)
 
     # ── YOLO model ────────────────────────────────────────────────────────────
@@ -487,6 +391,7 @@ def main(web_port: int = 8082):
     if web_port > 0:
         web_viewer = YOLOWebViewer(http_port=web_port, avoidance=None, detector=None)
         web_viewer.start()
+        web_viewer.manual_mode = True   # collect_data always uses browser controls
         print(f"[WEB] Viewer started on http://0.0.0.0:{web_port}")
 
     # ── LKAS client (lane detection) ──────────────────────────────────────────
@@ -529,10 +434,6 @@ def main(web_port: int = 8082):
     # ── Dataset ───────────────────────────────────────────────────────────────
     frame_id, csv_fh, csv_writer = _init_dataset(IMAGES_DIR, LABELS_CSV)
 
-    # ── Keyboard ──────────────────────────────────────────────────────────────
-    kbd = TerminalKeyboard()
-    kbd.start()
-
     # ── Signal handling ───────────────────────────────────────────────────────
     running = True
 
@@ -569,11 +470,11 @@ def main(web_port: int = 8082):
     try:
         while running:
 
-            # ── Quit check ────────────────────────────────────────────────────
-            left_held, right_held, down_held, space_pressed, quit_req = kbd.snapshot()
-            if quit_req:
-                print("\n[COLLECT] Quit key pressed")
-                break
+            # ── Web viewer input ──────────────────────────────────────────────
+            left_held     = web_viewer.manual_steering < 0 if web_viewer else False
+            right_held    = web_viewer.manual_steering > 0 if web_viewer else False
+            down_held     = web_viewer.manual_throttle < 0 if web_viewer else False
+            space_pressed = web_viewer.consume_release_mode() if web_viewer else False
 
             # ── Capture frame from RealSense camera ───────────────────────────
             color_bgr, depth_raw = camera.read_frames()
@@ -645,11 +546,22 @@ def main(web_port: int = 8082):
                     pass  # keep fixed fallback
 
             # ── Mode state machine ────────────────────────────────────────────
-            # Spacebar manually releases a locked mode back to NORMAL.
+            # Spacebar releases MICRO_ADJUST and LANE_CHANGE only.
+            # STOP auto-releases when obstacle clears; spacebar does NOT release it.
             if space_pressed:
-                current_mode  = 'NORMAL'
-                pending_mode  = 'NORMAL'
-                pending_count = 0
+                if current_mode in ('MICRO_ADJUST', 'LANE_CHANGE'):
+                    current_mode  = 'NORMAL'
+                    pending_mode  = 'NORMAL'
+                    pending_count = 0
+            elif current_mode == 'STOP':
+                # Auto-release when obstacle disappears beyond EXIT hysteresis
+                candidate = _decide_mode(
+                    boxes, distances, left_lane_x, right_lane_x, current_mode
+                )
+                if candidate == 'NORMAL':
+                    current_mode  = 'NORMAL'
+                    pending_mode  = 'NORMAL'
+                    pending_count = 0
             elif current_mode == 'NORMAL':
                 # Not locked — debounce candidates before committing.
                 candidate = _decide_mode(
@@ -663,29 +575,21 @@ def main(web_port: int = 8082):
                 if pending_count >= MODE_CONFIRM_FRAMES and pending_mode != 'NORMAL':
                     current_mode  = pending_mode
                     pending_count = 0
-            # else: mode is locked — ignore YOLO detections until space pressed
+            # else: MICRO_ADJUST or LANE_CHANGE — locked until spacebar
 
             # Throttle reduction only when an obstacle is actively within range,
             # not just because a mode is locked (obstacle may already be passed).
             nearest = min((d for d in distances if d > 0), default=-1.0)
             obstacle_active = nearest > 0 and nearest < DECISION_EXIT
 
-            # ── Steering source: web viewer OR keyboard ───────────────────────
-            # Throttle is always automatic (fixed forward + obstacle reduction).
-            # Only steering is manually controlled.
-            if web_viewer is not None and web_viewer.manual_mode:
-                # Web viewer controls steering only; throttle stays automatic.
-                input_steering = web_viewer.manual_steering
-                current_steering = input_steering  # keep in sync for mode switch back
+            # ── Steering: web viewer arrow keys ──────────────────────────────
+            if left_held and not right_held:
+                current_steering = -STEER_VALUE
+            elif right_held and not left_held:
+                current_steering = STEER_VALUE
             else:
-                # Keyboard: steering accumulates while key held, resets on release
-                if left_held and not right_held:
-                    current_steering = max(-1.0, current_steering - STEER_STEP)
-                elif right_held and not left_held:
-                    current_steering = min(1.0, current_steering + STEER_STEP)
-                else:
-                    current_steering = 0.0
-                input_steering = current_steering
+                current_steering = 0.0
+            input_steering = current_steering
 
             # ── Throttle: always automatic ────────────────────────────────────
             if down_held:
@@ -726,9 +630,9 @@ def main(web_port: int = 8082):
                     'right_lane_x':     right_lane_x,
                 })
 
-            # ── Save frame (rate-limited) ─────────────────────────────────────
+            # ── Save frame (rate-limited, only when mode is active) ──────────
             now = time.monotonic()
-            if now - last_save_time >= save_interval:
+            if current_mode != 'NORMAL' and now - last_save_time >= save_interval:
                 last_save_time = now
                 _save_frame(
                     frame_id   = frame_id,
@@ -766,7 +670,6 @@ def main(web_port: int = 8082):
             car.throttle = 0.0
             car.steering = 0.0
 
-        kbd.stop()
         csv_fh.close()
 
         sys.stdout.write("\n")
